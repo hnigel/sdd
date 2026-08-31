@@ -1,37 +1,32 @@
 ---
-description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex 審程式碼（含 F0 fast path）
-argument-hint: '[--full] <任務描述>'
+name: spec-pipeline
+description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex 審程式碼。流程主體，由 /fable、/opus、/task 帶入指定的規劃模型
 ---
 
-# /sdd — 規格驅動流程
+
+# 規格驅動流程（spec-pipeline）
 
 審查一律用 **`codex-review` skill**（**不要**用 `openai-codex` plugin 的 `/codex:review`
-—— 那個走 shared built-in reviewer，不是這裡要的做法）。
+—— 那個走 shared built-in reviewer）。
 
 專案差異全部靠 **`.claude/pipeline.json`** 吸收；**缺它就 fail-closed**（見文末）。
 
 ---
 
 
-## 選規劃模型
+## 指定的規劃模型
 
-```
-/sdd [--fable | --opus] [--full] <任務描述>
-```
+呼叫端（`/fable` / `/opus` / `/task`）會告訴你**這件事該用哪個模型規劃**。
 
-| 旗標 | 意思 |
+⚠️ **我不能切換自己的模型。** 主對話的模型只有 owner 能切（`/model`）。
+
+| 情況 | 做什麼 |
 |---|---|
-| `--fable` | 這件事要用 **Fable** 規劃 |
-| `--opus` | 這件事要用 **Opus** 規劃 |
-| （不給） | 由 S0 判 `normal`/`hard` 並**給建議**，由你決定 |
-| `--full` | 跳過 F0，直接走完整流程 |
+| 指定的模型 **== 當前模型** | 直接往下走 |
+| 指定的模型 **≠ 當前模型** | **停下來請 owner 切**。不得用錯的模型硬規劃 |
+| **沒指定**（`/task`） | S0 給建議並**問** owner，不自己決定 |
 
-⚠️ **我不能切換自己的模型。** 主對話的模型只有你能切（`/model`）。
-
-⇒ 指定的模型與當前模型**不符時，我停下來請你切**，**不會**用錯的模型硬規劃。
-這是刻意的：用錯模型規劃的成本，遠高於停下來問一句。
-
-⇒ 研究（S1r）不受影響 —— 那本來就是派 Sonnet subagent，我設得動。
+⇒ 研究（S1r）不受影響 —— 那本來就是派 Sonnet subagent，設得動。
 
 ## Step 0 — F0：這件事需要走完整流程嗎？
 

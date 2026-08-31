@@ -2,7 +2,7 @@
 /**
  * fast-eligibility.mjs — F0：這個任務可不可以跳過 S0–S3 直接進實作？
  *
- * 規劃：`plan/new_skill/design-v3-2026-08-31.md` §1「F0 fast-eligibility」
+ * spec-pipeline plugin 的 F0 判定。設計理由見 README「三條設計原則」①。
  *
  * ## 為什麼一定要是腳本，不能寫在 Markdown 裡
  * 「純樣式／局部常數／單一 symbol／test-only」這四個詞**都可以自我說服**。
