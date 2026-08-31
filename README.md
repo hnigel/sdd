@@ -2,10 +2,96 @@
 
 規格驅動流程的 Claude Code plugin：**分級規劃 → 規格 → 異廠商審規格 → 實作 → 異廠商審程式碼**。
 
+核心主張：**兩道閘門都不是「同一顆模型自己說過了」** ——
+規格與程式碼各給 Codex（異廠商）審一次，而「要不要走完整流程」「現在第幾輪」
+「能不能宣告 GREEN」全部由腳本判定，不是由模型判斷。
+
+---
+
+## 快速上手
+
+### 0. 前置需求
+
+| 需要什麼 | 為什麼 | 怎麼確認 |
+|---|---|---|
+| **Codex CLI**，已登入且帳號吃得到 `gpt-5.6-sol` | S3/S5 兩道閘門**全靠它**。沒裝的話會是 `RC=1` → `REVIEW_ERROR`，看起來像 prompt 寫壞，其實是根本沒裝 | 下面那個 smoke test |
+| **Node 18+** | 四支判定腳本 | `node -v` |
+| **能切主對話模型** | `/fable` 要 Fable、`/opus` 要 Opus。plugin **不能**替你切，只會停下來請你切 | `/model` |
+
+Codex smoke test（會真的花一次呼叫，約 4k tokens）：
+
+```bash
+echo '只回答兩個字：ok' | codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -
+```
+
+`rc=0` 且最後印出 `ok` 才算通過。任何非 0 都代表**兩道閘門現在是壞的**。
+
+### 1. 安裝
+
 ```
 /plugin marketplace add hnigel/sdd
 /plugin install spec-pipeline
 ```
+
+⚠️ 這是互動指令，**Claude 叫不動，要你自己打**。
+
+### 2. 在專案根目錄寫 `.claude/pipeline.json`
+
+最小可用的一份：
+
+```json
+{
+  "verify_cmd": "npm test",
+  "fast_path": {
+    "allow_globs": ["docs/**", "*.md"]
+  }
+}
+```
+
+`fast_path` 起得**越窄越好** —— 寧可漏放不要誤放。沒把握就整段不要寫，
+那代表「一律走完整流程」，是合法狀態不是錯誤。詳細欄位見下一節。
+
+### 3. 驗設定（別等跑起來才發現寫錯）
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-config.mjs"
+```
+
+⚠️ **要在 Claude Code 裡跑** —— `${CLAUDE_PLUGIN_ROOT}` 只有那裡才有值。
+在一般終端機跑會變成 `node /scripts/...` 找不到檔。
+直接叫 Claude「驗一下 pipeline.json」就行。
+
+| rc | 意思 |
+|---|---|
+| 0 | 通過 |
+| 2 | 設定寫錯（未知鍵、型別錯）—— 去修 |
+| 10 | 沒有這個檔 ⇒ fail-closed，只能規劃不能實作 |
+
+### 4. 把三個狀態檔加進 `.gitignore`
+
+流程會在你的專案裡寫入這三個檔，**都不該進版控**：
+
+```gitignore
+.claude/fast-baseline.json
+.claude/review-state.json
+.claude/spec-freeze.json
+```
+
+（`spec-freeze.json` 尤其要擋 —— 它為了算 delta 會存整份規格內容。）
+
+### 5. 開始用
+
+```
+/opus  <任務描述>      一般任務
+/fable <任務描述>      難任務（不可逆／相容性／安全／金流／多方案取捨）
+```
+
+加 `--full` 可以強制走完整流程，跳過 F0 快路判定。
+
+不確定難不難就打 `/opus` —— 如果 S0 判 `hard`，流程**會主動告訴你**指定與建議不一致。
+那句提醒是你唯一會拿到的難度訊號。
+
+---
 
 ## 提供什麼
 
@@ -17,7 +103,7 @@
 | `scripts/fast-eligibility.mjs` | F0 的**機械**判定（不呼叫任何模型） |
 | `scripts/review-state.mjs` | **輪數與收口狀態**。跨 session 可接續，R3 停止條件由它執行 |
 | `scripts/spec-freeze.mjs` | **凍結規格 + delta 複審**。偵測「把規格改成符合實作」 |
-| `schemas/pipeline.schema.json` | 設定形狀的**單一來源**：腳本與 CI 讀同一份 |
+| `schemas/pipeline.schema.json` | 設定形狀的**單一來源**：判定腳本與檢查讀同一份 |
 
 ## 每個專案要放 `.claude/pipeline.json`
 
@@ -53,7 +139,7 @@
 | 這件事要不要走完整流程 | `fast-eligibility.mjs` | glob + git diff + exit code |
 | 現在第幾輪、能不能宣告 GREEN | `review-state.mjs` | 狀態檔 + `rc=20/21` |
 | 規格有沒有被偷偷改成符合實作 | `spec-freeze.mjs` | sha256 比對 + `rc=20` |
-| 設定與 plugin 形狀有沒有漂移 | `schemas/` + `scripts/validate-plugin.mjs` | CI |
+| 設定與 plugin 形狀有沒有漂移 | `schemas/` + `scripts/validate-plugin.mjs` | pre-push hook |
 
 ⇒ 這四個都曾經是散文。散文寫得再清楚，實際做判斷的還是模型。
 
@@ -98,6 +184,15 @@ git config core.hooksPath .githooks
 （hook 不會跟著 clone 過來，這行是把 git 指到版控裡的那份。）
 
 真的要跳過：`git push --no-verify`。但這個 repo 被「兩份東西漂移而且沒有訊號」咬過很多次。
+
+## 分享給別人裝
+
+`hnigel/sdd` 目前是 **private repo**，別人（或你自己的另一台機器）能不能
+`/plugin marketplace add` 取決於那台的 GitHub 認證。要公開分享的話，
+**把 repo 轉 public 是最省事的做法** —— 這裡沒有任何機密，
+`pipeline.json` 才是放專案設定的地方，而那份留在各自的專案裡。
+
+**不是使用指南**。要用這個 plugin 只需要讀本檔。
 
 ## 刻意不做
 
