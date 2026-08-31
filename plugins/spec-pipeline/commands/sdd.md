@@ -38,7 +38,18 @@ argument-hint: '[--full] <任務描述>'
 ⚠️ **不要自己用語意判斷。** 「純樣式／局部常數／單一 symbol／test-only」四個詞
 都可以自我說服（`display:none` 藏功能、價格常數、共用 symbol、刪 assertion 都符合字面）。
 
-先列出**明確的候選檔案路徑**，然後跑：
+### 先問一句：現在知道要改哪些檔嗎？
+
+| 情況 | 做什麼 |
+|---|---|
+| **不知道**（調查型：「查一下」「為什麼會…」「玩家回報…」） | **直接走 FULL，不跑 F0** |
+| 知道 | 列出明確路徑，跑 F0 |
+
+⚠️ **scope 未知 = 風險未知 ⇒ 一定 FULL。** F0 刻意不接受「你自己去找要改哪些檔」——
+那等於把機械判定變回語意判斷。所以調查型任務**沒有路徑可給**，這不是錯誤，
+是「它本來就該走完整流程」。（`rc=2` 是**用法錯誤**，不要拿它當「再試一次」的訊號。）
+
+### 知道路徑時
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --check <path...>
@@ -48,7 +59,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --check <path...>
 |---|---|---|
 | **0** | FAST | 跳到 **Step 4**（單一 implementer，不拆平行 agent） |
 | **10** | FULL | 往下走 Step 1 |
-| 2 | 使用方式錯誤 | 補candidate 路徑再跑 |
+| **2** | 用法錯誤（例如沒給路徑） | **不要**猜路徑重試 —— 回到上面那張表，當成調查型走 FULL |
 
 使用者帶 `--full` ⇒ 直接走 FULL，不跑 F0。
 
@@ -70,7 +81,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --check <path...>
 - 單純玩家可見文字／樣式／局部數值**不因「玩家可見」自動變 hard**
 
 S0 只給**建議**（`hard`→Fable、`normal`→Opus）。
-- 你已經用 `--fable` / `--opus` 指定了 ⇒ **照你的**，S0 的建議只當參考記一筆
+- 你已經用 `--fable` / `--opus` 指定了 ⇒ **照你的**。
+  ⚠️ 但**指定與建議不一致時要講一聲**（例如你指定 Opus、S0 判 `hard`）——
+  那個不一致本身就是訊號，可能代表這件事比你以為的複雜。講完照你的做，不要擅自改。
 - 你沒指定 ⇒ 我講出建議並**問你要不要切**，不自己決定
 
 ## Step 2 — S1 規劃（＋ S1r 研究）
