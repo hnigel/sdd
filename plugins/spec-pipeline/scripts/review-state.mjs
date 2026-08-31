@@ -62,46 +62,83 @@ function save(s) {
   fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
 }
 
-/** 取 codex log 的 final response —— 與 codex-review skill 的 awk 同一套規則，只留這一份實作。 */
-function finalResponse(logFile) {
-  const lines = fs.readFileSync(logFile, 'utf8').split('\n');
-  let start = -1;
-  for (let i = 0; i < lines.length; i++) if (lines[i].trim() === 'codex') start = i;
-  return (start === -1 ? lines : lines.slice(start + 1)).join('\n').trim();
-}
+/**
+ * ⚠️ **不要解析散文。**
+ *
+ * 舊版是「含 BLOCKER 字樣的行 = 一條 finding」。三種真實情況全部失敗：
+ *   ① Codex 照 skill 建議的格式輸出「**BLOCKER** 標題 + **B1**…**B6** 條目」
+ *      ⇒ 只數到標題，六條算成一條
+ *   ② log 裡 final message 出現兩次 ⇒ 那一條又變成兩條
+ *   ③ Codex 用 `nl -ba` 把原始碼倒進 log，而原始碼註解裡就有 BLOCKER 字樣
+ *      ⇒ 實測一份真實 log 數出 **19 條**，沒有一條是真的 finding
+ *
+ * 三種的方向都可能偏低 ⇒ 收口兩條就 green_allowed:true。
+ * **一個專門防假綠的工具自己在製造假綠。**
+ *
+ * ⇒ 改成契約：Codex 必須輸出一個帶哨兵的區塊，這裡**只認那個區塊**。
+ *   認不出來就拒絕，絕不猜、絕不因為抓不到就當作零。
+ */
+const BEGIN = '<<<FINDINGS>>>';
+const END = '<<<END-FINDINGS>>>';
 
-// 「沒有 BLOCKER」這種宣告不是一條 finding
-const NEGATED = /(\bno\b|\bnone\b|\bzero\b|沒有|無)\s*[^\n]{0,12}BLOCKER|BLOCKER[^\n]{0,8}[:：]\s*(none|n\/a|無|沒有|0)\s*$/i;
+export const FORMAT_SPEC = `${BEGIN}
+B1 BLOCKER 一行描述（檔案:行號 + 為什麼會出事）
+B2 BLOCKER 一行描述
+P1 POLISH 一行描述
+${END}`;
 
 /**
- * 從 final response 抽出 BLOCKER / POLISH。
- * ⚠️ 抓不到任何格式標記時**不假設是零** —— 回 unstructured，逼呼叫端明講。
+ * 取**最後一個**哨兵區塊。
+ * 為什麼是最後一個：Codex 可能在工具輸出裡把含有這個格式的檔案倒出來（例如這份 skill
+ * 自己的說明），那些一定出現在中間；真正的回答一定在最後。
+ */
+function findingsBlock(text) {
+  const b = text.lastIndexOf(BEGIN);
+  if (b === -1) return null;
+  const e = text.indexOf(END, b);
+  if (e === -1) return null;
+  return text.slice(b + BEGIN.length, e).trim();
+}
+
+const ITEM = /^(B|P)(\d+)\s+(BLOCKER|POLISH)\s+(.+)$/;
+
+/**
+ * 解析區塊內容。**任何不合契約的地方都回 error，不做寬容處理。**
+ * 寬容 = 猜 = 回到當初出事的地方。
  */
 function parseFindings(text) {
-  const lines = text.split('\n');
-  const hasMarker = lines.some((l) => /\bBLOCKER\b|\bPOLISH\b/.test(l));
-  if (!hasMarker) return { parse: 'unstructured', blockers: [], polish: [] };
+  const block = findingsBlock(text);
+  if (block === null) return { error: 'no-block' };
 
   const blockers = [];
   const polish = [];
-  let cur = null;
-  for (const raw of lines) {
-    const l = raw.trim();
-    const isB = /\bBLOCKER\b/.test(l) && !NEGATED.test(l);
-    const isP = /\bPOLISH\b/.test(l) && !NEGATED.test(l);
-    if (isB || isP) {
-      cur = { kind: isB ? 'B' : 'P', text: l };
-      (isB ? blockers : polish).push(cur);
-    } else if (cur && l && !/^[-=_*#]{3,}$/.test(l)) {
-      cur.text += `\n${l}`;          // 續行併進上一條
-    } else if (!l) {
-      cur = null;
+  for (const raw of block.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = ITEM.exec(line);
+    if (!m) return { error: `區塊裡有不合格式的行：${JSON.stringify(line.slice(0, 80))}` };
+    const [, kind, num, level, desc] = m;
+    if ((kind === 'B') !== (level === 'BLOCKER')) {
+      return { error: `編號與等級對不上：${JSON.stringify(line.slice(0, 80))}（B* 必須是 BLOCKER，P* 必須是 POLISH）` };
+    }
+    (kind === 'B' ? blockers : polish).push({ n: Number(num), desc });
+  }
+
+  // 編號必須是 1..n 連續且不重複 —— 跳號通常代表輸出被截斷，那會讓計數偏低
+  for (const [name, arr] of [['B', blockers], ['P', polish]]) {
+    const ns = arr.map((x) => x.n).sort((a, b) => a - b);
+    for (let i = 0; i < ns.length; i++) {
+      if (ns[i] !== i + 1) {
+        return { error: `${name} 的編號不是 1..${ns.length} 連續（拿到 ${ns.join(',')}）—— 輸出可能被截斷` };
+      }
     }
   }
+
   return {
-    parse: 'structured',
-    blockers: blockers.map((b, i) => ({ id: `B${i + 1}`, text: b.text.trim(), resolved: null })),
-    polish: polish.map((p) => p.text.trim()),
+    block,
+    blockers: blockers.sort((a, b) => a.n - b.n)
+      .map((x) => ({ id: `B${x.n}`, text: x.desc, resolved: null })),
+    polish: polish.sort((a, b) => a.n - b.n).map((x) => x.desc),
   };
 }
 
@@ -137,18 +174,15 @@ function record(stage, rc, logFile, blockersOverride) {
   if (!logFile || !fs.existsSync(logFile)) usage(`--record 需要 --log <file>（找不到 ${logFile}）`);
   const s = load();
   const st = stageOf(s, stage);
+  const raw = fs.readFileSync(logFile, 'utf8');
 
-  const response = rc === 0 ? finalResponse(logFile) : '';
-
-  // 只有 RC=0 且 final response 完整非空才算一輪有效審查
-  if (rc !== 0 || !response) {
-    const why = rc !== 0 ? `RC=${rc}` : 'final response 是空的';
+  const reviewError = (why, note) => {
     st.invocation_failures.push({ at: new Date().toISOString(), rc, log: logFile, why });
     save(s);
     const used = st.invocation_failures.length;
     const out = {
       verdict: 'REVIEW_ERROR', why,
-      note: '這次不算一輪（輪數沒有增加）',
+      note: note ?? '這次不算一輪（輪數沒有增加）',
       invocation_retry: `${used}/${MAX_INVOCATION_RETRY}`,
     };
     if (used > MAX_INVOCATION_RETRY) {
@@ -159,26 +193,50 @@ function record(stage, rc, logFile, blockersOverride) {
     }
     console.log(JSON.stringify(out, null, 2));
     process.exit(21);
-  }
+  };
 
-  const parsed = parseFindings(response);
-  if (parsed.parse === 'unstructured' && blockersOverride === undefined) {
-    usage('回覆裡找不到 BLOCKER / POLISH 標記，無法機械判定還有幾條沒收口。\n'
-      + '  ⇒ 要嘛把 prompt 改成 BLOCKER/POLISH 兩級格式（codex-review skill 的實測有效模式 1），\n'
-      + '     要嘛明講 --blockers <n>。**不會**因為抓不到就當作零。');
-  }
+  // 只有 RC=0 且 log 非空才可能是一輪有效審查
+  if (rc !== 0) reviewError(`RC=${rc}`);
+  if (!raw.trim()) reviewError('log 是空的');
+
+  let parsed;
   if (blockersOverride !== undefined) {
-    parsed.blockers = Array.from({ length: blockersOverride }, (_, i) => ({
-      id: `B${i + 1}`, text: '(未結構化，由呼叫端宣告條數)', resolved: null,
-    }));
+    // 明確宣告的逃生口：呼叫端自己說有幾條。可見、可稽核，但不是預設路徑。
+    parsed = {
+      block: `(未使用哨兵區塊，由呼叫端宣告 ${blockersOverride} 條)`,
+      blockers: Array.from({ length: blockersOverride }, (_, i) => ({
+        id: `B${i + 1}`, text: '(由呼叫端宣告，無內容)', resolved: null,
+      })),
+      polish: [],
+    };
+  } else {
+    parsed = parseFindings(raw);
+    if (parsed.error === 'no-block') {
+      // ⚠️ 這裡**不能**當作零。可能是 review 沒跑完，也可能是 prompt 沒帶格式要求 ——
+      //    兩種都代表「這次沒有拿到可用的結果」，都不得計為一輪、更不得放行。
+      reviewError(
+        `log 裡找不到 ${BEGIN} 區塊`,
+        '兩種可能：① review 沒跑完 ② prompt 沒要求哨兵格式。'
+        + `把這段放進 prompt 的結尾要求：\n${FORMAT_SPEC}\n`
+        + '真的要手動宣告條數就用 --blockers <n>（不會因為抓不到就當作零）',
+      );
+    }
+    if (parsed.error) {
+      usage(`哨兵區塊格式不合：${parsed.error}\n  正確格式：\n${FORMAT_SPEC}`);
+    }
   }
 
   const n = st.rounds.length + 1;
-  st.rounds.push({ n, at: new Date().toISOString(), rc, log: logFile, response, ...parsed });
+  st.rounds.push({
+    n, at: new Date().toISOString(), rc, log: logFile,
+    findings_block: parsed.block,
+    blockers: parsed.blockers,
+    polish: parsed.polish,
+  });
   save(s);
 
   const open = parsed.blockers.length;
-  const out = { stage, round: `R${n}`, blockers: open, polish: parsed.polish.length, parse: parsed.parse };
+  const out = { stage, round: `R${n}`, blockers: open, polish: parsed.polish.length };
 
   if (open === 0) {
     out.verdict = 'CLEAR';
@@ -235,11 +293,23 @@ function promptBlock(stage) {
     lines.push('');
   }
   if (!r.blockers.length) lines.push('（上一輪沒有 BLOCKER）\n');
-  lines.push(`### 上一輪的完整回覆（逐字，供你自己核對）`);
+  lines.push('### 上一輪的 findings 區塊（逐字，供你自己核對）');
   lines.push('');
   lines.push('```');
-  lines.push(r.response);
+  lines.push(r.findings_block ?? '(無)');
   lines.push('```');
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+  lines.push('### ⚠️ 本輪輸出格式（必須照做，否則結果無法被機械判讀）');
+  lines.push('');
+  lines.push('回覆的**最後**要附上這個區塊，一條一行，編號從 1 連續：');
+  lines.push('');
+  lines.push('```');
+  lines.push(FORMAT_SPEC);
+  lines.push('```');
+  lines.push('');
+  lines.push('沒有 BLOCKER 就只列 P 行（或整個區塊留空），**不要省略區塊本身**。');
   console.log(lines.join('\n'));
 }
 

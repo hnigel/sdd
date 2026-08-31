@@ -1,0 +1,904 @@
+OpenAI Codex v0.150.0-alpha.7
+--------
+workdir: /Users/hnigel/coding/sdd
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 01a05a05-d0ea-7da0-aae2-9495dddb3f6c
+--------
+user
+審查 plugins/spec-pipeline/scripts/review-state.mjs 這一個檔。
+
+輸出格式（嚴格遵守）：
+- 分成 BLOCKER 與 POLISH 兩級
+- BLOCKER 每條要有編號、檔案:行號、以及為什麼會出事
+- POLISH 只列標題，不要展開
+
+請至少找出 4 條 BLOCKER。
+
+codex
+我會先讀目標檔及其相鄰測試／呼叫端，依實際狀態流找至少四個會造成錯誤結果或流程失效的問題；不會修改檔案。
+exec
+/bin/zsh -lc 'nl -ba plugins/spec-pipeline/scripts/review-state.mjs && rg -n "review-state|review state|reviewState" plugins/spec-pipeline -S' in /Users/hnigel/coding/sdd
+ succeeded in 0ms:
+     1	#!/usr/bin/env node
+     2	/**
+     3	 * review-state.mjs — Codex review 的**跨 session 操作狀態**
+     4	 *
+     5	 * ## 這支存在的理由
+     6	 * `codex-review` skill 說最有效的手法是「逐項核對上一輪」（實測讓 R1→R5 變成一輪見底），
+     7	 * 但流程原本不留任何狀態 ⇒ 換一個 session 就拿不到前輪 findings，
+     8	 * 於是 skill 只好寫一句免責聲明：「不得聲稱逐項收口」。
+     9	 * **那是用警告標語取代功能** —— 最有效的手法被建在一個會斷的地基上。
+    10	 *
+    11	 * ## 為什麼輪數也要機械化（跟 F0 同一個理由）
+    12	 * 「這算第二輪還第三輪」「這條算不算收口了」「這次 CLI 掛掉算不算一輪」
+    13	 * 三句都可以自我說服。散文寫得再清楚，實際數數的還是模型。
+    14	 * ⇒ 輪數、停止條件、invocation-retry 預算，全部由這支腳本持有。
+    15	 *
+    16	 * ## 這**不是** owner 否決的那個 log
+    17	 * 被否決的是遙測 / retro / 統計彙總（理由：一個人的使用量在統計上到不了決策點）。
+    18	 * 這裡存的是**當前這一 run 的操作狀態**：上一輪講了什麼、我怎麼處理的、現在第幾輪。
+    19	 * 不跨 run 彙總、不算趨勢、不產報表。run 結束就沒有價值了。
+    20	 *
+    21	 * ## 指令
+    22	 *   --start <stage> --task "<描述>"              開一個新 run（會覆蓋該 stage 的舊狀態）
+    23	 *   --record <stage> --rc <n> --log <file>       記一輪。RC≠0 或回覆空 ⇒ 不算一輪
+    24	 *   --resolve <stage> --item <id> --how "<做法>"  記下某條 finding 怎麼處理的
+    25	 *   --prompt-block <stage>                       產生下一輪 prompt 要貼的「上輪 findings + 我的處理」
+    26	 *   --status <stage>                             現在第幾輪、還有幾條沒收口、可不可以 GREEN
+    27	 *
+    28	 * ## 退出碼
+    29	 *   0  = OK
+    30	 *   2  = 使用方式錯誤
+    31	 *   10 = 沒有前輪狀態 ⇒ 當成新 run 從初審開始（**不是錯誤**）
+    32	 *   20 = STOP_ASK_OWNER（R3 仍有 BLOCKER，或 invocation-retry 用完）
+    33	 *   21 = REVIEW_ERROR（RC≠0 或回覆空 ⇒ 這次不算一輪）
+    34	 */
+    35	
+    36	import fs from 'node:fs';
+    37	import path from 'node:path';
+    38	
+    39	const ROOT = process.cwd();
+    40	const STATE = path.join(ROOT, '.claude', 'review-state.json');
+    41	
+    42	const MAX_ROUNDS = 3;        // R3 仍有 BLOCKER ⇒ 停下來問 owner
+    43	const MAX_INVOCATION_RETRY = 2;  // CLI 失敗另走最多兩次，不佔輪數
+    44	
+    45	function usage(msg) {
+    46	  console.error(`review-state: ${msg}`);
+    47	  console.error(`用法:
+    48	  review-state.mjs --start <stage> --task "<描述>"
+    49	  review-state.mjs --record <stage> --rc <n> --log <file> [--blockers <n>]
+    50	  review-state.mjs --resolve <stage> --item <id> --how "<做法>"
+    51	  review-state.mjs --prompt-block <stage>
+    52	  review-state.mjs --status <stage>`);
+    53	  process.exit(2);
+    54	}
+    55	
+    56	const load = () => (fs.existsSync(STATE)
+    57	  ? JSON.parse(fs.readFileSync(STATE, 'utf8'))
+    58	  : { version: 1, stages: {} });
+    59	
+    60	function save(s) {
+    61	  fs.mkdirSync(path.dirname(STATE), { recursive: true });
+    62	  fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
+    63	}
+    64	
+    65	/** 取 codex log 的 final response —— 與 codex-review skill 的 awk 同一套規則，只留這一份實作。 */
+    66	function finalResponse(logFile) {
+    67	  const lines = fs.readFileSync(logFile, 'utf8').split('\n');
+    68	  let start = -1;
+    69	  for (let i = 0; i < lines.length; i++) if (lines[i].trim() === 'codex') start = i;
+    70	  return (start === -1 ? lines : lines.slice(start + 1)).join('\n').trim();
+    71	}
+    72	
+    73	// 「沒有 BLOCKER」這種宣告不是一條 finding
+    74	const NEGATED = /(\bno\b|\bnone\b|\bzero\b|沒有|無)\s*[^\n]{0,12}BLOCKER|BLOCKER[^\n]{0,8}[:：]\s*(none|n\/a|無|沒有|0)\s*$/i;
+    75	
+    76	/**
+    77	 * 從 final response 抽出 BLOCKER / POLISH。
+    78	 * ⚠️ 抓不到任何格式標記時**不假設是零** —— 回 unstructured，逼呼叫端明講。
+    79	 */
+    80	function parseFindings(text) {
+    81	  const lines = text.split('\n');
+    82	  const hasMarker = lines.some((l) => /\bBLOCKER\b|\bPOLISH\b/.test(l));
+    83	  if (!hasMarker) return { parse: 'unstructured', blockers: [], polish: [] };
+    84	
+    85	  const blockers = [];
+    86	  const polish = [];
+    87	  let cur = null;
+    88	  for (const raw of lines) {
+    89	    const l = raw.trim();
+    90	    const isB = /\bBLOCKER\b/.test(l) && !NEGATED.test(l);
+    91	    const isP = /\bPOLISH\b/.test(l) && !NEGATED.test(l);
+    92	    if (isB || isP) {
+    93	      cur = { kind: isB ? 'B' : 'P', text: l };
+    94	      (isB ? blockers : polish).push(cur);
+    95	    } else if (cur && l && !/^[-=_*#]{3,}$/.test(l)) {
+    96	      cur.text += `\n${l}`;          // 續行併進上一條
+    97	    } else if (!l) {
+    98	      cur = null;
+    99	    }
+   100	  }
+   101	  return {
+   102	    parse: 'structured',
+   103	    blockers: blockers.map((b, i) => ({ id: `B${i + 1}`, text: b.text.trim(), resolved: null })),
+   104	    polish: polish.map((p) => p.text.trim()),
+   105	  };
+   106	}
+   107	
+   108	const stageOf = (s, name) => {
+   109	  const st = s.stages[name];
+   110	  if (!st) {
+   111	    console.error(`review-state: stage "${name}" 沒有狀態 —— 先跑 --start，或當成新 run 從初審開始`);
+   112	    process.exit(10);
+   113	  }
+   114	  return st;
+   115	};
+   116	const lastRound = (st) => st.rounds[st.rounds.length - 1] ?? null;
+   117	const openBlockers = (st) => (lastRound(st)?.blockers ?? []).filter((b) => !b.resolved);
+   118	
+   119	// ── --start ────────────────────────────────────────────────────────────
+   120	function start(stage, task) {
+   121	  if (!task) usage('--start 需要 --task "<描述>"（用來確認狀態屬於這一 run，不是上一件事的殘留）');
+   122	  const s = load();
+   123	  const prev = s.stages[stage];
+   124	  if (prev && prev.rounds.length) {
+   125	    // 不靜默覆蓋：前一 run 沒收完就重開，是要讓人看見的事
+   126	    console.error(`⚠️ ${stage} 原本有一個未結束的 run（task: ${prev.task}，已跑 ${prev.rounds.length} 輪，`
+   127	      + `${openBlockers(prev).length} 條未收口）—— 已覆蓋。`);
+   128	  }
+   129	  s.stages[stage] = { task, started_at: new Date().toISOString(), rounds: [], invocation_failures: [] };
+   130	  save(s);
+   131	  console.log(JSON.stringify({ stage, task, round: 0, next: 'R1 初審' }, null, 2));
+   132	}
+   133	
+   134	// ── --record ───────────────────────────────────────────────────────────
+   135	function record(stage, rc, logFile, blockersOverride) {
+   136	  if (rc === undefined || Number.isNaN(rc)) usage('--record 需要 --rc <n>');
+   137	  if (!logFile || !fs.existsSync(logFile)) usage(`--record 需要 --log <file>（找不到 ${logFile}）`);
+   138	  const s = load();
+   139	  const st = stageOf(s, stage);
+   140	
+   141	  const response = rc === 0 ? finalResponse(logFile) : '';
+   142	
+   143	  // 只有 RC=0 且 final response 完整非空才算一輪有效審查
+   144	  if (rc !== 0 || !response) {
+   145	    const why = rc !== 0 ? `RC=${rc}` : 'final response 是空的';
+   146	    st.invocation_failures.push({ at: new Date().toISOString(), rc, log: logFile, why });
+   147	    save(s);
+   148	    const used = st.invocation_failures.length;
+   149	    const out = {
+   150	      verdict: 'REVIEW_ERROR', why,
+   151	      note: '這次不算一輪（輪數沒有增加）',
+   152	      invocation_retry: `${used}/${MAX_INVOCATION_RETRY}`,
+   153	    };
+   154	    if (used > MAX_INVOCATION_RETRY) {
+   155	      out.verdict = 'STOP_ASK_OWNER';
+   156	      out.note = `invocation-retry 已用掉 ${used} 次（上限 ${MAX_INVOCATION_RETRY}）⇒ 停下來問 owner`;
+   157	      console.log(JSON.stringify(out, null, 2));
+   158	      process.exit(20);
+   159	    }
+   160	    console.log(JSON.stringify(out, null, 2));
+   161	    process.exit(21);
+   162	  }
+   163	
+   164	  const parsed = parseFindings(response);
+   165	  if (parsed.parse === 'unstructured' && blockersOverride === undefined) {
+   166	    usage('回覆裡找不到 BLOCKER / POLISH 標記，無法機械判定還有幾條沒收口。\n'
+   167	      + '  ⇒ 要嘛把 prompt 改成 BLOCKER/POLISH 兩級格式（codex-review skill 的實測有效模式 1），\n'
+   168	      + '     要嘛明講 --blockers <n>。**不會**因為抓不到就當作零。');
+   169	  }
+   170	  if (blockersOverride !== undefined) {
+   171	    parsed.blockers = Array.from({ length: blockersOverride }, (_, i) => ({
+   172	      id: `B${i + 1}`, text: '(未結構化，由呼叫端宣告條數)', resolved: null,
+   173	    }));
+   174	  }
+   175	
+   176	  const n = st.rounds.length + 1;
+   177	  st.rounds.push({ n, at: new Date().toISOString(), rc, log: logFile, response, ...parsed });
+   178	  save(s);
+   179	
+   180	  const open = parsed.blockers.length;
+   181	  const out = { stage, round: `R${n}`, blockers: open, polish: parsed.polish.length, parse: parsed.parse };
+   182	
+   183	  if (open === 0) {
+   184	    out.verdict = 'CLEAR';
+   185	    out.note = '這一階段無未處理 BLOCKER（GREEN 還要 verify_cmd RC=0）';
+   186	    console.log(JSON.stringify(out, null, 2));
+   187	    return;
+   188	  }
+   189	  if (n >= MAX_ROUNDS) {
+   190	    out.verdict = 'STOP_ASK_OWNER';
+   191	    out.note = `R${n} 仍有 ${open} 條 BLOCKER（上限 ${MAX_ROUNDS} 輪）⇒ 停下來問 owner，不要再開下一輪`;
+   192	    console.log(JSON.stringify(out, null, 2));
+   193	    process.exit(20);
+   194	  }
+   195	  out.verdict = 'NEEDS_FIX';
+   196	  out.note = `修完用 --resolve 逐條記下做法，再用 --prompt-block 產生 R${n + 1} 的 prompt`;
+   197	  out.items = parsed.blockers.map((b) => b.id);
+   198	  console.log(JSON.stringify(out, null, 2));
+   199	}
+   200	
+   201	// ── --resolve ──────────────────────────────────────────────────────────
+   202	function resolve(stage, item, how) {
+   203	  if (!item || !how) usage('--resolve 需要 --item <id> 與 --how "<做法>"');
+   204	  const s = load();
+   205	  const st = stageOf(s, stage);
+   206	  const r = lastRound(st);
+   207	  if (!r) usage(`${stage} 還沒有任何一輪`);
+   208	  const b = r.blockers.find((x) => x.id === item);
+   209	  if (!b) usage(`${stage} R${r.n} 沒有 ${item}（有的是：${r.blockers.map((x) => x.id).join(', ') || '無'}）`);
+   210	  b.resolved = { how, at: new Date().toISOString() };
+   211	  save(s);
+   212	  const open = openBlockers(st);
+   213	  console.log(JSON.stringify({ stage, round: `R${r.n}`, resolved: item, still_open: open.map((x) => x.id) }, null, 2));
+   214	}
+   215	
+   216	// ── --prompt-block ─────────────────────────────────────────────────────
+   217	function promptBlock(stage) {
+   218	  const s = load();
+   219	  const st = stageOf(s, stage);
+   220	  const r = lastRound(st);
+   221	  if (!r) {
+   222	    console.error(`review-state: ${stage} 還沒有任何一輪 ⇒ 這次就是 R1 初審`);
+   223	    process.exit(10);
+   224	  }
+   225	  const lines = [];
+   226	  lines.push(`## 上一輪（R${r.n}）你提出的項目，與我的處理`);
+   227	  lines.push('');
+   228	  lines.push('⚠️ 請**逐項**確認是否真的收口。沒收口的直接說沒收口，不要重新發散到別的題目。');
+   229	  lines.push('');
+   230	  for (const b of r.blockers) {
+   231	    lines.push(`### ${b.id}（BLOCKER）`);
+   232	    lines.push(b.text);
+   233	    lines.push('');
+   234	    lines.push(b.resolved ? `**我的處理**：${b.resolved.how}` : '**我的處理**：⚠️ 尚未處理');
+   235	    lines.push('');
+   236	  }
+   237	  if (!r.blockers.length) lines.push('（上一輪沒有 BLOCKER）\n');
+   238	  lines.push(`### 上一輪的完整回覆（逐字，供你自己核對）`);
+   239	  lines.push('');
+   240	  lines.push('```');
+   241	  lines.push(r.response);
+   242	  lines.push('```');
+   243	  console.log(lines.join('\n'));
+   244	}
+   245	
+   246	// ── --status ───────────────────────────────────────────────────────────
+   247	function status(stage) {
+   248	  const s = load();
+   249	  const st = stageOf(s, stage);
+   250	  const r = lastRound(st);
+   251	  const open = openBlockers(st);
+   252	  console.log(JSON.stringify({
+   253	    stage,
+   254	    task: st.task,
+   255	    rounds_done: st.rounds.length,
+   256	    next_round: st.rounds.length >= MAX_ROUNDS ? '(已達上限)' : `R${st.rounds.length + 1}`,
+   257	    invocation_retry: `${st.invocation_failures.length}/${MAX_INVOCATION_RETRY}`,
+   258	    open_blockers: open.map((b) => b.id),
+   259	    green_allowed: Boolean(r) && open.length === 0,
+   260	    note: !r ? '還沒有有效的一輪 ⇒ 不得 GREEN'
+   261	      : open.length ? `還有 ${open.length} 條未收口 ⇒ 不得 GREEN`
+   262	        : '本階段無未處理 BLOCKER（GREEN 仍需 verify_cmd RC=0）',
+   263	  }, null, 2));
+   264	}
+   265	
+   266	// ── 參數 ───────────────────────────────────────────────────────────────
+   267	const argv = process.argv.slice(2);
+   268	const flag = (name) => {
+   269	  const i = argv.indexOf(name);
+   270	  return i === -1 ? undefined : argv[i + 1];
+   271	};
+   272	const [mode, stage] = argv;
+   273	if (!stage || stage.startsWith('--')) usage(`${mode ?? '(缺指令)'} 需要 <stage>（例如 S3 / S5）`);
+   274	
+   275	switch (mode) {
+   276	  case '--start': start(stage, flag('--task')); break;
+   277	  case '--record': {
+   278	    const bo = flag('--blockers');
+   279	    record(stage, Number(flag('--rc')), flag('--log'), bo === undefined ? undefined : Number(bo));
+   280	    break;
+   281	  }
+   282	  case '--resolve': resolve(stage, flag('--item'), flag('--how')); break;
+   283	  case '--prompt-block': promptBlock(stage); break;
+   284	  case '--status': status(stage); break;
+   285	  default: usage(`不認得的指令: ${mode}`);
+   286	}
+plugins/spec-pipeline/skills/codex-review/SKILL.md:58:   ⚠️ 這個格式不只是好讀 —— `review-state.mjs` 靠它機械數出還剩幾條沒收口。
+plugins/spec-pipeline/skills/codex-review/SKILL.md:61:   ⇒ 不用手寫，跑 `review-state.mjs --prompt-block <stage>` 直接產生。
+plugins/spec-pipeline/skills/codex-review/SKILL.md:104:## Step 4: 輪數與收斂 —— 交給 `review-state.mjs`
+plugins/spec-pipeline/skills/codex-review/SKILL.md:110:RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+plugins/spec-pipeline/skills/codex-review/SKILL.md:129:狀態在 `.claude/review-state.json`。換 session 直接 `--prompt-block <stage>`
+plugins/spec-pipeline/skills/spec-pipeline/SKILL.md:102:RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+plugins/spec-pipeline/skills/spec-pipeline/SKILL.md:145:再**載入 `codex-review` skill**、走模式 A 審 code（輪數一樣交給 `review-state.mjs`，stage 用 `S5`）。
+plugins/spec-pipeline/skills/spec-pipeline/SKILL.md:194:## 輪數與停止 —— 交給 `review-state.mjs`，不要自己數
+plugins/spec-pipeline/skills/spec-pipeline/SKILL.md:211:狀態存在 `.claude/review-state.json` ⇒ **換 session 可以接續**：
+plugins/spec-pipeline/skills/spec-pipeline/SKILL.md:218:`verify_cmd` RC=0 ＋ `review-state --status <stage>` 的 `green_allowed: true`
+plugins/spec-pipeline/scripts/review-state.mjs:3: * review-state.mjs — Codex review 的**跨 session 操作狀態**
+plugins/spec-pipeline/scripts/review-state.mjs:40:const STATE = path.join(ROOT, '.claude', 'review-state.json');
+plugins/spec-pipeline/scripts/review-state.mjs:46:  console.error(`review-state: ${msg}`);
+plugins/spec-pipeline/scripts/review-state.mjs:48:  review-state.mjs --start <stage> --task "<描述>"
+plugins/spec-pipeline/scripts/review-state.mjs:49:  review-state.mjs --record <stage> --rc <n> --log <file> [--blockers <n>]
+plugins/spec-pipeline/scripts/review-state.mjs:50:  review-state.mjs --resolve <stage> --item <id> --how "<做法>"
+plugins/spec-pipeline/scripts/review-state.mjs:51:  review-state.mjs --prompt-block <stage>
+plugins/spec-pipeline/scripts/review-state.mjs:52:  review-state.mjs --status <stage>`);
+plugins/spec-pipeline/scripts/review-state.mjs:111:    console.error(`review-state: stage "${name}" 沒有狀態 —— 先跑 --start，或當成新 run 從初審開始`);
+plugins/spec-pipeline/scripts/review-state.mjs:222:    console.error(`review-state: ${stage} 還沒有任何一輪 ⇒ 這次就是 R1 初審`);
+plugins/spec-pipeline/scripts/spec-freeze.mjs:42:const REVIEW_STATE = path.join(ROOT, '.claude', 'review-state.json');
+plugins/spec-pipeline/scripts/spec-freeze.mjs:90:    console.error('⚠️ 沒有 .claude/review-state.json —— 無法確認 S3 收口了沒。凍結照做，但這件事沒有被驗過。');
+plugins/spec-pipeline/scripts/spec-freeze.mjs:95:    console.error('⚠️ review-state 裡 S3 還沒有任何有效的一輪 —— 凍結照做，但 S3 尚未真的通過。');
+plugins/spec-pipeline/tests/review-state.test.mjs:2: * review-state —— Codex review 的跨 session 操作狀態
+plugins/spec-pipeline/tests/review-state.test.mjs:18:const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/review-state.mjs');
+plugins/spec-pipeline/tests/spec-freeze.test.mjs:18:function sandbox(reviewState) {
+plugins/spec-pipeline/tests/spec-freeze.test.mjs:22:  if (reviewState) writeFileSync(join(dir, '.claude/review-state.json'), JSON.stringify(reviewState));
+plugins/spec-pipeline/tests/spec-freeze.test.mjs:51:  it('沒有 review-state → 凍結照做，但要出聲說「這件事沒有被驗過」', () => {
+
+exec
+/bin/zsh -lc "nl -ba plugins/spec-pipeline/tests/review-state.test.mjs && nl -ba plugins/spec-pipeline/skills/codex-review/SKILL.md | sed -n '45,145p' && nl -ba plugins/spec-pipeline/scripts/spec-freeze.mjs | sed -n '70,115p' && nl -ba plugins/spec-pipeline/skills/spec-pipeline/SKILL.md | sed -n '90,230p'" in /Users/hnigel/coding/sdd
+ succeeded in 0ms:
+     1	/**
+     2	 * review-state —— Codex review 的跨 session 操作狀態
+     3	 *
+     4	 * 這支存在的理由跟 fast-eligibility 一樣：輪數與停止條件如果是散文，
+     5	 * 實際數數的還是模型，而「這算第幾輪」「這條算不算收口」都可以自我說服。
+     6	 *
+     7	 * ⚠️ 退出碼：0 = OK、10 = 沒有前輪狀態（**不是錯誤**）、
+     8	 *            20 = STOP_ASK_OWNER、21 = REVIEW_ERROR、2 = 使用方式錯誤。
+     9	 */
+    10	import { describe, it } from 'node:test';
+    11	import assert from 'node:assert/strict';
+    12	import { spawnSync } from 'node:child_process';
+    13	import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+    14	import { tmpdir } from 'node:os';
+    15	import { join, dirname, resolve } from 'node:path';
+    16	import { fileURLToPath } from 'node:url';
+    17	
+    18	const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/review-state.mjs');
+    19	
+    20	function sandbox() {
+    21	  const dir = mkdtempSync(join(tmpdir(), 'rs-'));
+    22	  mkdirSync(join(dir, '.claude'), { recursive: true });
+    23	  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+    24	}
+    25	const run = (dir, ...args) => spawnSync('node', [SCRIPT, ...args], { cwd: dir, encoding: 'utf8' });
+    26	
+    27	/** 假的 codex log：final response 在最後一個單獨的 `codex` 行之後 */
+    28	function log(dir, name, body) {
+    29	  const p = join(dir, name);
+    30	  writeFileSync(p, `[2026-08-31] OpenAI Codex\n--------\nthinking\nsome noise\ncodex\n${body}\n`);
+    31	  return p;
+    32	}
+    33	
+    34	const TWO_BLOCKERS = `BLOCKER 1: verify-scope 的基準是 HEAD，implementer 一 commit 就抓不到
+    35	  這會回報 0 檔 0 行的假綠。
+    36	
+    37	BLOCKER 2: deny_globs 拼錯會靜默失效
+    38	
+    39	POLISH: 變數命名`;
+    40	
+    41	describe('⭐ 一輪的有效性（只有 RC=0 且回覆非空才算）', () => {
+    42	  it('RC≠0 → REVIEW_ERROR(21)，而且**輪數不增加**', () => {
+    43	    const { dir, cleanup } = sandbox();
+    44	    try {
+    45	      run(dir, '--start', 'S3', '--task', 't');
+    46	      const r = run(dir, '--record', 'S3', '--rc', '1', '--log', log(dir, 'a.log', 'x'));
+    47	      assert.equal(r.status, 21);
+    48	      assert.match(JSON.parse(r.stdout).note, /輪數沒有增加/);
+    49	      assert.equal(JSON.parse(run(dir, '--status', 'S3').stdout).rounds_done, 0);
+    50	    } finally { cleanup(); }
+    51	  });
+    52	
+    53	  it('RC=0 但 final response 是空的 → 一樣 REVIEW_ERROR', () => {
+    54	    const { dir, cleanup } = sandbox();
+    55	    try {
+    56	      run(dir, '--start', 'S3', '--task', 't');
+    57	      const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'b.log', ''));
+    58	      assert.equal(r.status, 21);
+    59	      assert.match(JSON.parse(r.stdout).why, /空/);
+    60	    } finally { cleanup(); }
+    61	  });
+    62	
+    63	  it('⭐ invocation-retry 用完（>2）→ STOP_ASK_OWNER(20)', () => {
+    64	    const { dir, cleanup } = sandbox();
+    65	    try {
+    66	      run(dir, '--start', 'S3', '--task', 't');
+    67	      const l = log(dir, 'c.log', 'x');
+    68	      assert.equal(run(dir, '--record', 'S3', '--rc', '1', '--log', l).status, 21);
+    69	      assert.equal(run(dir, '--record', 'S3', '--rc', '1', '--log', l).status, 21);
+    70	      assert.equal(run(dir, '--record', 'S3', '--rc', '1', '--log', l).status, 20);
+    71	    } finally { cleanup(); }
+    72	  });
+    73	});
+    74	
+    75	describe('⭐⭐ 抓不到格式標記時不得當作零', () => {
+    76	  it('回覆沒有 BLOCKER/POLISH → 使用方式錯誤(2)，逼呼叫端明講', () => {
+    77	    const { dir, cleanup } = sandbox();
+    78	    try {
+    79	      run(dir, '--start', 'S3', '--task', 't');
+    80	      const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'd.log', '看起來都還不錯，沒什麼大問題'));
+    81	      assert.equal(r.status, 2, '抓不到就當零 ⇒ 一份沒格式的回覆會直接變成 CLEAR');
+    82	      assert.match(r.stderr, /不會.*因為抓不到就當作零/);
+    83	    } finally { cleanup(); }
+    84	  });
+    85	
+    86	  it('明講 --blockers 就放行', () => {
+    87	    const { dir, cleanup } = sandbox();
+    88	    try {
+    89	      run(dir, '--start', 'S3', '--task', 't');
+    90	      const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'e.log', '隨便寫'), '--blockers', '2');
+    91	      assert.equal(r.status, 0);
+    92	      assert.equal(JSON.parse(r.stdout).blockers, 2);
+    93	    } finally { cleanup(); }
+    94	  });
+    95	
+    96	  it('「沒有 BLOCKER」這種宣告不算一條 finding', () => {
+    97	    const { dir, cleanup } = sandbox();
+    98	    try {
+    99	      run(dir, '--start', 'S3', '--task', 't');
+   100	      const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'f.log', '沒有 BLOCKER。\n\nPOLISH: 命名'));
+   101	      assert.equal(r.status, 0, r.stdout + r.stderr);
+   102	      const o = JSON.parse(r.stdout);
+   103	      assert.equal(o.blockers, 0);
+   104	      assert.equal(o.verdict, 'CLEAR');
+   105	    } finally { cleanup(); }
+   106	  });
+   107	});
+   108	
+   109	describe('⭐⭐ 停止條件是機械的', () => {
+   110	  it('R3 仍有 BLOCKER → STOP_ASK_OWNER(20)，不得再開下一輪', () => {
+   111	    const { dir, cleanup } = sandbox();
+   112	    try {
+   113	      run(dir, '--start', 'S3', '--task', 't');
+   114	      const l = log(dir, 'g.log', TWO_BLOCKERS);
+   115	      assert.equal(run(dir, '--record', 'S3', '--rc', '0', '--log', l).status, 0);
+   116	      assert.equal(run(dir, '--record', 'S3', '--rc', '0', '--log', l).status, 0);
+   117	      const r3 = run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+   118	      assert.equal(r3.status, 20);
+   119	      assert.match(JSON.parse(r3.stdout).note, /停下來問 owner/);
+   120	    } finally { cleanup(); }
+   121	  });
+   122	
+   123	  it('沒有有效的一輪 → green_allowed = false', () => {
+   124	    const { dir, cleanup } = sandbox();
+   125	    try {
+   126	      run(dir, '--start', 'S3', '--task', 't');
+   127	      assert.equal(JSON.parse(run(dir, '--status', 'S3').stdout).green_allowed, false);
+   128	    } finally { cleanup(); }
+   129	  });
+   130	
+   131	  it('還有未收口的 BLOCKER → green_allowed = false', () => {
+   132	    const { dir, cleanup } = sandbox();
+   133	    try {
+   134	      run(dir, '--start', 'S3', '--task', 't');
+   135	      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'h.log', TWO_BLOCKERS));
+   136	      const s = JSON.parse(run(dir, '--status', 'S3').stdout);
+   137	      assert.equal(s.green_allowed, false);
+   138	      assert.deepEqual(s.open_blockers, ['B1', 'B2']);
+   139	    } finally { cleanup(); }
+   140	  });
+   141	
+   142	  it('S3 與 S5 各自獨立計數', () => {
+   143	    const { dir, cleanup } = sandbox();
+   144	    try {
+   145	      const l = log(dir, 'i.log', TWO_BLOCKERS);
+   146	      run(dir, '--start', 'S3', '--task', 't');
+   147	      run(dir, '--start', 'S5', '--task', 't');
+   148	      run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+   149	      run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+   150	      assert.equal(JSON.parse(run(dir, '--status', 'S3').stdout).rounds_done, 2);
+   151	      assert.equal(JSON.parse(run(dir, '--status', 'S5').stdout).rounds_done, 0);
+   152	    } finally { cleanup(); }
+   153	  });
+   154	});
+   155	
+   156	describe('⭐⭐ 跨 session resume —— 這支存在的全部理由', () => {
+   157	  it('新的 process（= 新 session）讀得到前輪 findings 與我的處理', () => {
+   158	    const { dir, cleanup } = sandbox();
+   159	    try {
+   160	      run(dir, '--start', 'S3', '--task', '把 F0 改成腳本');
+   161	      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'j.log', TWO_BLOCKERS));
+   162	      run(dir, '--resolve', 'S3', '--item', 'B1', '--how', '改成 diff 入場 commit，補測試');
+   163	
+   164	      // 到這裡為止的狀態全部只存在檔案裡；下面每一次 run 都是全新 process
+   165	      const block = run(dir, '--prompt-block', 'S3');
+   166	      assert.equal(block.status, 0, block.stderr);
+   167	      assert.match(block.stdout, /逐項/);
+   168	      assert.match(block.stdout, /B1/);
+   169	      assert.match(block.stdout, /改成 diff 入場 commit，補測試/);
+   170	      assert.match(block.stdout, /B2[\s\S]*尚未處理/, '沒處理的要標成尚未處理，不能混進去');
+   171	      assert.match(block.stdout, /verify-scope 的基準是 HEAD/, '要附上一輪逐字回覆當安全網');
+   172	    } finally { cleanup(); }
+   173	  });
+   174	
+   175	  it('沒有任何狀態 → rc=10「當成新 run 從初審開始」，不是錯誤也不是假裝有', () => {
+   176	    const { dir, cleanup } = sandbox();
+   177	    try {
+   178	      const r = run(dir, '--prompt-block', 'S3');
+   179	      assert.equal(r.status, 10);
+   180	      assert.match(r.stderr, /從初審開始/);
+   181	    } finally { cleanup(); }
+   182	  });
+   183	
+   184	  it('--resolve 之後 status 反映出來', () => {
+   185	    const { dir, cleanup } = sandbox();
+   186	    try {
+   187	      run(dir, '--start', 'S3', '--task', 't');
+   188	      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'k.log', TWO_BLOCKERS));
+   189	      run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+   190	      run(dir, '--resolve', 'S3', '--item', 'B2', '--how', 'y');
+   191	      const s = JSON.parse(run(dir, '--status', 'S3').stdout);
+   192	      assert.deepEqual(s.open_blockers, []);
+   193	      assert.equal(s.green_allowed, true);
+   194	    } finally { cleanup(); }
+   195	  });
+   196	
+   197	  it('--resolve 不存在的 id → 使用方式錯誤，不得默默成功', () => {
+   198	    const { dir, cleanup } = sandbox();
+   199	    try {
+   200	      run(dir, '--start', 'S3', '--task', 't');
+   201	      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'l.log', TWO_BLOCKERS));
+   202	      assert.equal(run(dir, '--resolve', 'S3', '--item', 'B9', '--how', 'x').status, 2);
+   203	    } finally { cleanup(); }
+   204	  });
+   205	
+   206	  it('--start 覆蓋未結束的 run 時要出聲（不得靜默清掉沒收口的項目）', () => {
+   207	    const { dir, cleanup } = sandbox();
+   208	    try {
+   209	      run(dir, '--start', 'S3', '--task', '第一件事');
+   210	      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'm.log', TWO_BLOCKERS));
+   211	      const r = run(dir, '--start', 'S3', '--task', '第二件事');
+   212	      assert.match(r.stderr, /未結束的 run/);
+   213	      assert.match(r.stderr, /2 條未收口/);
+   214	    } finally { cleanup(); }
+   215	  });
+   216	});
+    45	
+    46	## Step 1: 寫 prompt 檔（模式 A）
+    47	
+    48	放在唯一暫存目錄，**不要用固定路徑**。
+    49	
+    50	prompt 必須自己寫死這些（因為不能用 `--commit`）：
+    51	- review target：commit SHA / 檔案清單 / 工作樹範圍
+    52	- **上一輪的 findings 與「我怎麼處理的」**（要它逐項確認是否收口，否則它會重新發散）
+    53	- 輸出格式（見下方兩個實測有效模式）
+    54	
+    55	### 兩個實測有效的 prompt 模式
+    56	
+    57	1. **BLOCKER / POLISH 兩級**，並明寫 **POLISH 只列標題、不展開**。
+    58	   ⚠️ 這個格式不只是好讀 —— `review-state.mjs` 靠它機械數出還剩幾條沒收口。
+    59	   不用這個格式，腳本會回 `rc=2` 要你明講條數（**它不會因為抓不到就當作零**）。
+    60	2. **逐項核對上一輪**：把「你上輪說 X，我改成 Y」寫進 prompt，要它確認**每一項**是否真的收口。
+    61	   ⇒ 不用手寫，跑 `review-state.mjs --prompt-block <stage>` 直接產生。
+    62	
+    63	> 佐證（真實案例）：某批 UI 修正 R1→R7 七輪才收斂，轉折點是第三輪**改變方法**；
+    64	> 另一批規劃 R1→R5，改成只問 BLOCKER/POLISH 之後一輪見底。
+    65	> 通則：同一問題重試上限兩輪，第三次必須換方法。
+    66	
+    67	## Step 2: 跑（背景，RC 立刻保存）
+    68	
+    69	```bash
+    70	tmp="$(mktemp -d)"
+    71	# ... 把 prompt 寫進 "$tmp/prompt.txt" ...
+    72	"${CX[@]}" - < "$tmp/prompt.txt" > "$tmp/out.log" 2>&1
+    73	rc=$?; printf '%s' "$rc" > "$tmp/rc"
+    74	echo "tmp=$tmp rc=$rc"
+    75	```
+    76	
+    77	**模式 B**（無自訂 prompt 的初審）：
+    78	```bash
+    79	codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol \
+    80	  -c 'model_reasoning_effort="xhigh"' review --commit <sha> > "$tmp/out.log" 2>&1
+    81	```
+    82	
+    83	⚠️ 用 Bash tool 跑時**一定要 `run_in_background: true`** —— 高 effort 的 review 常
+    84	超過 10 分鐘，前景會被工具逾時砍掉（`exit 143`），而且 RC 檔不會被寫出來。
+    85	
+    86	## Step 3: 判讀 RC（**先看 RC，再看內容**）
+    87	
+    88	| RC | 意思 | 動作 |
+    89	|---|---|---|
+    90	| **0** | 正常結束 | 才可以解讀內容 |
+    91	| **1** | 一般執行失敗（**額度耗盡是其中一種**，訊息在 log 尾巴） | **REVIEW_ERROR**，review 其實沒跑完 |
+    92	| **2** | 參數解析失敗 | **REVIEW_ERROR**，修命令再跑 |
+    93	
+    94	> **只有 `RC=0` 且 final response 完整非空**才算一輪有效審查。
+    95	> 任何 `RC != 0` **一律不得 GREEN**。
+    96	
+    97	### 讀結論
+    98	
+    99	```bash
+   100	N=$(awk '/^codex$/{n=NR} END{print n}' "$tmp/out.log")
+   101	sed -n "${N},\$p" "$tmp/out.log"
+   102	```
+   103	
+   104	## Step 4: 輪數與收斂 —— 交給 `review-state.mjs`
+   105	
+   106	⚠️ **不要自己數輪數。** 「這算第幾輪」「這條算不算收口」「CLI 掛掉算不算一輪」
+   107	三句都可以自我說服 —— 跟 F0 是同一個問題，所以同一個解法：機械化。
+   108	
+   109	```bash
+   110	RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+   111	
+   112	$RS --start S3 --task "<這件事>"                    # 一個 run 開一次
+   113	$RS --record S3 --rc "$rc" --log "$tmp/out.log"    # 每輪跑完立刻記
+   114	$RS --resolve S3 --item B1 --how "<怎麼處理的>"      # 每修一條記一條
+   115	$RS --prompt-block S3                              # 下一輪的 prompt 素材
+   116	$RS --status S3                                    # green_allowed 在這裡看
+   117	```
+   118	
+   119	| rc | 意思 |
+   120	|---|---|
+   121	| 0 | OK |
+   122	| 10 | 沒有前輪狀態 ⇒ 這次是 R1 初審（**不是錯誤**） |
+   123	| 20 | STOP_ASK_OWNER（R3 仍有 BLOCKER，或 invocation-retry 用完） |
+   124	| 21 | REVIEW_ERROR（RC≠0 或回覆空）⇒ **這次不算一輪** |
+   125	| 2 | 使用方式錯誤。含「回覆裡抓不到 BLOCKER/POLISH，無法判定還剩幾條」 |
+   126	
+   127	### 跨 session 現在可以接續了
+   128	
+   129	狀態在 `.claude/review-state.json`。換 session 直接 `--prompt-block <stage>`
+   130	就拿得到「上一輪的 findings ＋ 我怎麼處理的 ＋ 上輪逐字回覆」。
+   131	
+   132	⚠️ 但 `rc=10` 時**不得聲稱逐項收口** —— 那代表真的沒有狀態，當成新 run 從初審開始。
+   133	
+   134	⚠️ 這**不是** owner 否決的那個 log。被否決的是遙測 / retro / 統計彙總。
+   135	這裡存的是當前這一 run 的操作狀態，不跨 run 彙總、不算趨勢、run 結束就沒價值了。
+   136	
+   137	---
+   138	
+   139	## ⚠️ 三條曾經寫錯的事實（2026-08-31 更正）
+   140	
+   141	**這一段存在的理由**：這些原本以「本機實測」的口吻寫在筆記裡，看起來很可信，
+   142	但其中三條在同一台機器的今天已經不成立。**帶版本號的實測筆記也會過期，而且沒有訊號。**
+   143	
+   144	### ① effort 不是 `none`，本機是 `xhigh`
+   145	
+    70	    execFileSync('git', ['diff', '--no-index', '--unified=3', '--', a, b], { encoding: 'utf8' });
+    71	    return '';
+    72	  } catch (e) {
+    73	    if (e.status === 1) {
+    74	      // git 的 `a/` `b/` 前綴後面直接接絕對路徑（斜線是路徑自己的），
+    75	      // 所以替換時要保留前導斜線，否則會變成 `adesign.md`
+    76	      const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    77	      return String(e.stdout)
+    78	        .replace(new RegExp(esc(a), 'g'), `/${label}`)
+    79	        .replace(new RegExp(esc(b), 'g'), `/${label}`);
+    80	    }
+    81	    throw e;
+    82	  } finally {
+    83	    fs.rmSync(dir, { recursive: true, force: true });
+    84	  }
+    85	}
+    86	
+    87	/** S3 還有未收口的 BLOCKER 就不該凍結 —— 「S3 不 GREEN 不進 Step 4」。 */
+    88	function assertS3Clear() {
+    89	  if (!fs.existsSync(REVIEW_STATE)) {
+    90	    console.error('⚠️ 沒有 .claude/review-state.json —— 無法確認 S3 收口了沒。凍結照做，但這件事沒有被驗過。');
+    91	    return;
+    92	  }
+    93	  const st = JSON.parse(fs.readFileSync(REVIEW_STATE, 'utf8')).stages?.S3;
+    94	  if (!st || !st.rounds.length) {
+    95	    console.error('⚠️ review-state 裡 S3 還沒有任何有效的一輪 —— 凍結照做，但 S3 尚未真的通過。');
+    96	    return;
+    97	  }
+    98	  const open = (st.rounds[st.rounds.length - 1].blockers ?? []).filter((b) => !b.resolved);
+    99	  if (open.length) {
+   100	    console.error(`spec-freeze: S3 還有 ${open.length} 條未收口（${open.map((b) => b.id).join(', ')}）⇒ 不得凍結。`);
+   101	    console.error('「S3 不 GREEN 不進 Step 4」—— 先把它們收掉。');
+   102	    process.exit(20);
+   103	  }
+   104	}
+   105	
+   106	function freeze(spec) {
+   107	  if (!spec || !fs.existsSync(spec)) usage(`--freeze 需要存在的規格檔（找不到 ${spec}）`);
+   108	  assertS3Clear();
+   109	  const content = fs.readFileSync(spec, 'utf8');
+   110	  save({
+   111	    version: 1,
+   112	    spec: path.relative(ROOT, path.resolve(spec)),
+   113	    sha: sha(content),
+   114	    frozen_at: new Date().toISOString(),
+   115	    content,
+    90	
+    91	要查網路／查 repo 就派 **Sonnet subagent**，主對話只收結論。
+    92	
+    93	## Step 3 — S2 規格 → S3 Codex 審規格
+    94	
+    95	寫成文件（位置照專案慣例，例如 `plan/<主題>/design-<日期>.md`），
+    96	然後**載入 `codex-review` skill**、走**模式 A**。
+    97	（它是 skill 不是斜線指令 —— 沒有 `/codex-review` 這個東西。）
+    98	
+    99	輪數與收口狀態由腳本持有，**不要自己數**：
+   100	
+   101	```bash
+   102	RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+   103	$RS --start S3 --task "<這件事>"        # 開一輪新的
+   104	# … 跑 codex，拿到 $tmp/out.log 與 rc …
+   105	$RS --record S3 --rc "$rc" --log "$tmp/out.log"
+   106	$RS --resolve S3 --item B1 --how "<怎麼處理的>"   # 每修一條就記一條
+   107	$RS --prompt-block S3                  # 產生下一輪要貼的「上輪 findings + 我的處理」
+   108	```
+   109	
+   110	⚠️ **S3 不 GREEN 不進 Step 4。** GREEN 的判定看 `--status S3` 的 `green_allowed`。
+   111	
+   112	S3 收口之後**凍結規格**：
+   113	
+   114	```bash
+   115	node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" --freeze <規格檔>
+   116	```
+   117	
+   118	從這裡開始，那份規格是唯一驗收依據。
+   119	
+   120	## Step 4 — S4 實作
+   121	
+   122	- FAST：**單一 implementer**
+   123	- FULL：可拆平行 subagent
+   124	
+   125	實作完**立刻**重驗 scope：
+   126	
+   127	```bash
+   128	node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --verify-scope .claude/fast-baseline.json
+   129	```
+   130	
+   131	`rc=10` ⇒ **停止 implementer、不自動回滾、保留 diff**，轉 full retriage 重走。
+   132	
+   133	## Step 5 — 驗證 + S5 Codex 審程式碼
+   134	
+   135	先確認規格沒有被偷偷改過：
+   136	
+   137	```bash
+   138	node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" --check
+   139	```
+   140	
+   141	`rc=20`（SPEC_DRIFT）⇒ **停下來**。規格被改成符合實作，是比「實作偏離規格」更隱蔽的失敗
+   142	（見下方第 6 條）。
+   143	
+   144	然後跑 `pipeline.json` 的 `verify_cmd`，**RC 寫檔再讀**，
+   145	再**載入 `codex-review` skill**、走模式 A 審 code（輪數一樣交給 `review-state.mjs`，stage 用 `S5`）。
+   146	
+   147	---
+   148	
+   149	---
+   150	
+   151	## 規劃者 = 監督者（whole-task ownership）
+   152	
+   153	⚠️ **規劃的那個模型要負責到底，不是寫完規格就下班。**
+   154	
+   155	S1 的規劃者**就是主對話**，也是唯一從頭到尾都在的角色。它持有六件事：
+   156	
+   157	| # | 職責 | 失敗的樣子 |
+   158	|---|---|---|
+   159	| 1 | **凍結的規格是唯一驗收依據** | 實作偏離規格卻因為「測試過了」被放行 |
+   160	| 2 | S4 之後**逐條**比對規格 vs 實作 | 只看 verify RC=0 就宣告完成 |
+   161	| 3 | **不接受 subagent 的自我回報** | agent 說「已修好」就採信，沒要 `file:line` 與實跑證據 |
+   162	| 4 | 持有**輪數與停止條件** | 第三輪還在原地打轉卻繼續 review |
+   163	| 5 | **只有監督者能宣告 GREEN** | 某個 subagent 自己說 GREEN |
+   164	| 6 | 規格錯了 ⇒ **回 S2 改規格再走** | 就地改實作、規格從此與現實脫節 |
+   165	
+   166	### 第 3 條要怎麼落實
+   167	
+   168	派 subagent 時**在派工單裡就寫死**：
+   169	- 回報必須帶 `file:line`
+   170	- 宣告「修好了」必須附**負控組實跑紅**的證據（把實作改壞 → 測試真的紅 → 還原）
+   171	- **RC 一律寫檔再讀**，不要 `| tail`
+   172	
+   173	收到回報之後，監督者**自己抽驗**至少一項，不要全盤採信。
+   174	
+   175	### 第 6 條特別容易違反 —— 所以給它一條便宜的路
+   176	
+   177	任務中途發現規格有錯時，最省事的做法是**就地改實作**（或更糟：把規格改成符合實作）。
+   178	那不是紀律問題，是**成本問題**：誠實的路比偷懶的路貴十倍時，規則就是在跟人性對賭。
+   179	
+   180	⇒ 改規格走這條，S3 **只複審 delta，不整份重審**：
+   181	
+   182	```bash
+   183	SF="node ${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs"
+   184	# 直接編輯規格檔，然後：
+   185	$SF --revise <規格檔> --why "<為什麼規格要改>"
+   186	$SF --delta            # 把這段貼進 S3 複審的 prompt
+   187	```
+   188	
+   189	⚠️ **不要跳過 `--revise` 直接改規格檔** —— `--check` 會判 `SPEC_DRIFT` 並擋下來。
+   190	那個檢查存在的理由：把規格追認成實作的樣子，會讓下一輪 review 拿一份已經被追認過的
+   191	規格來審，然後理所當然地通過。**那是全流程最隱蔽的假綠。**
+   192	
+   193	---
+   194	## 輪數與停止 —— 交給 `review-state.mjs`，不要自己數
+   195	
+   196	⚠️ 「這算第幾輪」「這條算不算收口」「這次 CLI 掛掉算不算一輪」**三句都可以自我說服**。
+   197	跟 F0 同一個理由：寫在散文裡，實際數數的還是模型。
+   198	
+   199	規則（由腳本執行，不是由你判斷）：
+   200	
+   201	| 規則 | 腳本怎麼做 |
+   202	|---|---|
+   203	| 每階段獨立計數（S3 / S5） | 狀態按 stage 分開 |
+   204	| 只有 `RC=0` 且回應非空才算一輪 | `--record` 遇到 RC≠0 或空回覆 ⇒ `rc=21`，**輪數不增加** |
+   205	| CLI 失敗另走最多兩次 | 超過 ⇒ `rc=20` STOP_ASK_OWNER |
+   206	| R3 仍有 BLOCKER ⇒ 停下來問 owner | `--record` 第三輪還有未收口 ⇒ `rc=20` |
+   207	| 抓不到 BLOCKER/POLISH 格式 | `rc=2`，**不會因為抓不到就當作零** |
+   208	
+   209	### 跨 session
+   210	
+   211	狀態存在 `.claude/review-state.json` ⇒ **換 session 可以接續**：
+   212	跑 `--prompt-block <stage>` 就拿得到前輪 findings 與我的處理。
+   213	
+   214	`rc=10`（沒有狀態）⇒ 這次就是 R1 初審，**不得聲稱逐項收口**。
+   215	
+   216	## GREEN 的必要條件（同時成立）
+   217	
+   218	`verify_cmd` RC=0 ＋ `review-state --status <stage>` 的 `green_allowed: true`
+   219	＋（S5 才有）`spec-freeze --check` 回 `OK`。
+   220	
+   221	⚠️ 三個都是**腳本回答**的，不是你判斷的。
+   222	
+   223	## 缺 `.claude/pipeline.json` 時（fail-closed）
+   224	
+   225	**只允許 Step 1–3 與唯讀檢查。** 不得進 Step 4、**不得修改任何專案檔案**，
+   226	也不得 commit / push / deploy / migration。
+   227	結果只能是 `BLOCKED_UNCONFIGURED` 或 `UNVERIFIED`，**不得 GREEN**。
+
+codex
+目前已確認核心風險集中在「解析計數」與「GREEN 判定」：標準的兩級章節格式會被錯算，而 `--resolve` 的自我回報會直接被當成已驗證收口。我再用最小案例核對退出碼與輪數上限是否真的可繞過。
+exec
+/bin/zsh -lc 'node --test plugins/spec-pipeline/tests/review-state.test.mjs' in /Users/hnigel/coding/sdd
+ exited 1 in 4ms:
+1..4
+# tests 15
+# suites 4
+# pass 0
+# fail 15
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 46.209083
+
+codex
+## BLOCKER
+
+1. `plugins/spec-pipeline/scripts/review-state.mjs:117` — `--resolve` 只是記錄「我怎麼處理」，卻立即把 finding 視為已收口；全部 resolve 後 `green_allowed` 直接變成 `true`，完全不需要下一輪 reviewer 確認，會造成假 GREEN。
+
+2. `plugins/spec-pipeline/scripts/review-state.mjs:90` — parser 把 `BLOCKER` 章節標題本身當成 finding；標題下的編號項目則被合併或在空行後直接忽略。因此多條 BLOCKER 可能只剩一個 `B1`，resolve 一次便錯誤關閉整個章節。
+
+3. `plugins/spec-pipeline/scripts/review-state.mjs:82` — 只要回覆含有 `POLISH` 就會被視為 structured；即使完全缺少 `BLOCKER` 區段，也會得到零 blockers 並回傳 `CLEAR`。截斷或漏寫一半的 review 因而能假綠。
+
+4. `plugins/spec-pipeline/scripts/review-state.mjs:278` — `--blockers` 沒有驗證為非負整數；`--blockers abc` 會變成 `NaN`、負數也被接受，兩者建立出的 blocker 陣列長度都是零，最終錯誤回傳 `CLEAR`。
+
+5. `plugins/spec-pipeline/scripts/review-state.mjs:176` — 寫入新 round 前沒有檢查 `MAX_ROUNDS`。R3 回傳 `STOP_ASK_OWNER` 後仍可繼續記錄 R4；若 R4 宣告零 blockers，狀態又會變成可 GREEN，機械停止條件可被直接繞過。
+
+6. `plugins/spec-pipeline/scripts/review-state.mjs:74` — `NEGATED` 會搜尋整條 finding 的任意位置；真正的項目只要在標題或說明中引用「沒有 BLOCKER」或 `no BLOCKER`，整條就被當成否定宣告而丟棄，可能漏算 blocker 並假綠。
+
+## POLISH
+
+- 狀態檔寫入缺乏 atomic replace
+- 未驗證狀態檔 schema 與 version
+- 已完成的舊 run 仍被誤報為未結束
+- flag parser 未拒絕重複及游離參數
+tokens used
+36,545
+## BLOCKER
+
+1. `plugins/spec-pipeline/scripts/review-state.mjs:117` — `--resolve` 只是記錄「我怎麼處理」，卻立即把 finding 視為已收口；全部 resolve 後 `green_allowed` 直接變成 `true`，完全不需要下一輪 reviewer 確認，會造成假 GREEN。
+
+2. `plugins/spec-pipeline/scripts/review-state.mjs:90` — parser 把 `BLOCKER` 章節標題本身當成 finding；標題下的編號項目則被合併或在空行後直接忽略。因此多條 BLOCKER 可能只剩一個 `B1`，resolve 一次便錯誤關閉整個章節。
+
+3. `plugins/spec-pipeline/scripts/review-state.mjs:82` — 只要回覆含有 `POLISH` 就會被視為 structured；即使完全缺少 `BLOCKER` 區段，也會得到零 blockers 並回傳 `CLEAR`。截斷或漏寫一半的 review 因而能假綠。
+
+4. `plugins/spec-pipeline/scripts/review-state.mjs:278` — `--blockers` 沒有驗證為非負整數；`--blockers abc` 會變成 `NaN`、負數也被接受，兩者建立出的 blocker 陣列長度都是零，最終錯誤回傳 `CLEAR`。
+
+5. `plugins/spec-pipeline/scripts/review-state.mjs:176` — 寫入新 round 前沒有檢查 `MAX_ROUNDS`。R3 回傳 `STOP_ASK_OWNER` 後仍可繼續記錄 R4；若 R4 宣告零 blockers，狀態又會變成可 GREEN，機械停止條件可被直接繞過。
+
+6. `plugins/spec-pipeline/scripts/review-state.mjs:74` — `NEGATED` 會搜尋整條 finding 的任意位置；真正的項目只要在標題或說明中引用「沒有 BLOCKER」或 `no BLOCKER`，整條就被當成否定宣告而丟棄，可能漏算 blocker 並假綠。
+
+## POLISH
+
+- 狀態檔寫入缺乏 atomic replace
+- 未驗證狀態檔 schema 與 version
+- 已完成的舊 run 仍被誤報為未結束
+- flag parser 未拒絕重複及游離參數
