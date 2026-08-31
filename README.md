@@ -187,12 +187,11 @@ git config core.hooksPath .githooks
 
 ## 分享給別人裝
 
-`hnigel/sdd` 目前是 **private repo**，別人（或你自己的另一台機器）能不能
-`/plugin marketplace add` 取決於那台的 GitHub 認證。要公開分享的話，
-**把 repo 轉 public 是最省事的做法** —— 這裡沒有任何機密，
-`pipeline.json` 才是放專案設定的地方，而那份留在各自的專案裡。
+這個 repo 是 public 的，直接 `/plugin marketplace add hnigel/sdd` 就裝得起來。
+專案設定不在這裡 —— `pipeline.json` 留在各自的專案根目錄。
 
-**不是使用指南**。要用這個 plugin 只需要讀本檔。
+⚠️ `HANDOFF.md` 是寫給**維護這個 plugin 的人**看的，**不是使用指南**。
+要用這個 plugin 只需要讀本檔。
 
 ## 刻意不做
 
