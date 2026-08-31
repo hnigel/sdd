@@ -1,9 +1,9 @@
-# claude-workflow
+# sdd — spec-driven pipeline
 
 規格驅動流程的 Claude Code plugin：**分級規劃 → 規格 → 異廠商審規格 → 實作 → 異廠商審程式碼**。
 
 ```
-/plugin marketplace add hnigel/claude-workflow
+/plugin marketplace add hnigel/sdd
 /plugin install spec-pipeline
 ```
 
@@ -11,7 +11,8 @@
 
 | 東西 | 用途 |
 |---|---|
-| `/sdd` | 主流程。含 **F0 快路判定**、S0 分級、S3/S5 兩道 Codex 閘門、輪數與停止條件 |
+| `/fable` `/opus` `/task` | 三個薄指令，只帶入「這件事該用哪個模型規劃」 |
+| `spec-pipeline` skill | **流程主體**（唯一來源）：F0 快路、S0 分級、S3/S5 兩道 Codex 閘門、輪數與停止條件 |
 | `codex-review` skill | 呼叫 Codex 的**單一來源**：模式選擇、環境釘死、RC 判讀、三條曾經寫錯的事實 |
 | `scripts/fast-eligibility.mjs` | F0 的**機械**判定（不呼叫任何模型） |
 

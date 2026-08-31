@@ -1,6 +1,8 @@
 {
-  "name": "claude-workflow",
-  "owner": { "name": "hnigel" },
+  "name": "sdd",
+  "owner": {
+    "name": "hnigel"
+  },
   "metadata": {
     "description": "規格驅動流程：分級規劃 → 規格 → 異廠商審規格 → 實作 → 異廠商審程式碼",
     "version": "0.1.0"
@@ -10,7 +12,9 @@
       "name": "spec-pipeline",
       "description": "F0 快路判定（機械式）+ /sdd 主流程 + codex-review 呼叫契約。跨專案，靠 .claude/pipeline.json 吸收專案差異。",
       "version": "0.1.0",
-      "author": { "name": "hnigel" },
+      "author": {
+        "name": "hnigel"
+      },
       "source": "./plugins/spec-pipeline"
     }
   ]
