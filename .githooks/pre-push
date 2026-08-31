@@ -1,0 +1,48 @@
+#!/bin/sh
+# pre-push —— push 之前先在本機把檢查跑完，紅的就不讓它上去
+#
+# ## 為什麼是 hook 不是 GitHub Actions
+# private repo 的 Actions 要付費額度，而這個 repo 的檢查只要 3 秒、零依賴。
+# CI 對一個人用的專案，真正的價值是「不靠你記得」—— hook 一樣做得到。
+#
+# ## 裝法（換機器 clone 之後要跑一次，hook 不會跟著 clone 過來）
+#   git config core.hooksPath .githooks
+#
+# ## 真的要跳過（例如只改 README 又很趕）
+#   git push --no-verify
+#   ⚠️ 但這個 repo 被「兩份東西漂移而且沒有訊號」咬過很多次，跳過前想一下。
+
+set -e
+
+echo "── pre-push 檢查 ──────────────────────────────"
+
+log="$(mktemp)"
+trap 'rm -f "$log"' EXIT
+
+printf '  形狀檢查（manifest / frontmatter / 引用 / schema）… '
+if node scripts/validate-plugin.mjs > "$log" 2>&1; then
+  echo "OK"
+else
+  echo "紅"
+  echo
+  cat "$log"
+  echo
+  echo "⇒ push 中止。修好再推，或 git push --no-verify 強推。"
+  exit 1
+fi
+
+printf '  測試… '
+if node --test plugins/spec-pipeline/tests/*.test.mjs > "$log" 2>&1; then
+  echo "$(grep -E '^# pass' "$log" | tr -dc 0-9) 個全過"
+else
+  echo "紅"
+  echo
+  # 只印失敗的部分，不要把整份 TAP 倒出來
+  grep -E '^not ok|^# (tests|pass|fail)|error:|AssertionError' "$log" | head -40
+  echo
+  echo "完整輸出： node --test plugins/spec-pipeline/tests/*.test.mjs"
+  echo "⇒ push 中止。"
+  exit 1
+fi
+
+echo "───────────────────────────────────────────────"

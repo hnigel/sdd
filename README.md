@@ -85,7 +85,19 @@ node --test plugins/spec-pipeline/tests/*.test.mjs   # 44 個 case
 node scripts/validate-plugin.mjs                     # manifest / frontmatter / 引用 / schema
 ```
 
-CI 兩件都跑。改腳本一定要跑，並且**附負控組**（改壞 → 測試真的紅 → 還原）。
+改腳本一定要跑，並且**附負控組**（改壞 → 測試真的紅 → 還原）。
+
+### 檢查在本機擋，不在 GitHub 擋
+
+`git push` 會先跑 `.githooks/pre-push`，紅的就不讓它上去。**clone 之後要裝一次**：
+
+```bash
+git config core.hooksPath .githooks
+```
+
+（hook 不會跟著 clone 過來，這行是把 git 指到版控裡的那份。）
+
+真的要跳過：`git push --no-verify`。但這個 repo 被「兩份東西漂移而且沒有訊號」咬過很多次。
 
 ## 刻意不做
 
@@ -93,3 +105,8 @@ CI 兩件都跑。改腳本一定要跑，並且**附負控組**（改壞 → �
   （每週 1–4 件 eligible task，光是 20 pilot + 80 confirmatory 就要 25–100 週）
 - ❌ **審查 ROI 實驗** —— 同上。審查固定開，理由是品質，不宣稱省成本
 - ❌ `openai-codex` plugin 的 `/codex:review`（走 shared built-in reviewer）
+- ❌ **GitHub Actions** —— private repo 的 Actions 要付費額度，實際推上去是
+  `The job was not started because recent account payments have failed`，
+  也就是**根本沒開機器**。而這裡的檢查只要 3 秒、零依賴。
+  CI 對一個人用的專案，真正的價值是「不靠你記得」—— pre-push hook 一樣做得到。
+  代價誠實記錄：hook 只在裝過的機器上有效，換機器要重跑一次 `core.hooksPath`。
