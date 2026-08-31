@@ -27,7 +27,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
+import { validate } from './lib/validate-config.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SCHEMA = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'schemas', 'pipeline.schema.json'), 'utf8'));
 
 const ROOT = process.cwd();
 const CONFIG = path.join(ROOT, '.claude', 'pipeline.json');
@@ -60,33 +65,28 @@ function usage(msg) {
   process.exit(2);
 }
 
-/** `fast_path` 認得的鍵。`_` 開頭視為註解（既有設定用 `_comment` 寫理由）。 */
-const FAST_PATH_KEYS = new Set(['allow_globs', 'deny_globs']);
-
 function loadConfig() {
   if (!fs.existsSync(CONFIG)) return { err: '缺 .claude/pipeline.json' };
   let cfg;
   try { cfg = JSON.parse(fs.readFileSync(CONFIG, 'utf8')); }
   catch (e) { return { err: `pipeline.json 不是合法 JSON: ${e.message}` }; }
-  // fail-closed：缺 verify_cmd 就不可能驗證，也就不可能宣告 GREEN
-  if (!cfg.verify_cmd || typeof cfg.verify_cmd !== 'string') return { err: '缺 verify_cmd' };
+
+  // 形狀一律交給 schema（`schemas/pipeline.schema.json` 是唯一來源，CI 也讀它）。
+  // ⚠️ 這裡擋的是**唯一一個 fail-open 的洞**：`deny_globs` 拼錯成 `denyGlobs` 時，
+  //    舊版「不是陣列就當空陣列」⇒ deny 整條靜默失效，敏感路徑因為符合 allow 拿到 FAST。
+  //    allow 拼錯會 FULL（安全方向），deny 拼錯卻會放行 —— 方向剛好相反。
+  const errs = validate(cfg, SCHEMA);
+  if (errs.length) {
+    // 缺 required 的欄位 ⇒ 這個專案還沒設定好，走 FULL（fail-closed，但不是「寫錯」）
+    // 其他（未知鍵、型別錯）⇒ 是人寫錯了，要看得見，不能默默降級
+    const missing = errs.every((e) => e.startsWith('缺 '));
+    return missing ? { err: errs.join('；') } : { fatal: errs.join('；') };
+  }
+
+  // `fast_path` 在 schema 裡是選填 —— 沒設的專案就是一律走 FULL，那是合法狀態不是錯誤
   const fp = cfg.fast_path;
-  if (!fp || !Array.isArray(fp.allow_globs) || fp.allow_globs.length === 0) {
-    return { err: '缺 fast_path.allow_globs' };
-  }
-  // ⚠️ 這一段擋的是**唯一一個 fail-open 的洞**：
-  //    `deny_globs` 拼錯（例如 `denyGlobs`）時，舊版是「不是陣列就當空陣列」——
-  //    deny 整條靜默失效，敏感路徑會因為符合 allow 而拿到 FAST，且沒有任何訊號。
-  //    allow 拼錯會 FULL（安全），deny 拼錯卻會放行，方向剛好相反。
-  //    ⇒ 未知鍵一律當**設定錯誤**（rc=2）讓人看見，而不是默默降級。
-  for (const k of Object.keys(fp)) {
-    if (k.startsWith('_')) continue;
-    if (!FAST_PATH_KEYS.has(k)) {
-      return { fatal: `fast_path 有未知鍵 "${k}"（認得的只有 ${[...FAST_PATH_KEYS].join(' / ')}；`
-        + '註解請用 `_` 開頭）。拼錯 deny_globs 會讓整條 deny 靜默失效，所以這裡不放行' };
-    }
-  }
-  return { cfg, allow: fp.allow_globs, deny: Array.isArray(fp.deny_globs) ? fp.deny_globs : [] };
+  if (!fp) return { err: '缺 fast_path.allow_globs（沒設 fast path ⇒ 一律走 FULL）' };
+  return { cfg, allow: fp.allow_globs, deny: fp.deny_globs ?? [] };
 }
 
 const git = (args) => execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' });

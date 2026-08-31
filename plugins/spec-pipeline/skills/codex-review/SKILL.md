@@ -55,7 +55,10 @@ prompt 必須自己寫死這些（因為不能用 `--commit`）：
 ### 兩個實測有效的 prompt 模式
 
 1. **BLOCKER / POLISH 兩級**，並明寫 **POLISH 只列標題、不展開**。
+   ⚠️ 這個格式不只是好讀 —— `review-state.mjs` 靠它機械數出還剩幾條沒收口。
+   不用這個格式，腳本會回 `rc=2` 要你明講條數（**它不會因為抓不到就當作零**）。
 2. **逐項核對上一輪**：把「你上輪說 X，我改成 Y」寫進 prompt，要它確認**每一項**是否真的收口。
+   ⇒ 不用手寫，跑 `review-state.mjs --prompt-block <stage>` 直接產生。
 
 > 佐證（真實案例）：某批 UI 修正 R1→R7 七輪才收斂，轉折點是第三輪**改變方法**；
 > 另一批規劃 R1→R5，改成只問 BLOCKER/POLISH 之後一輪見底。
@@ -98,14 +101,38 @@ N=$(awk '/^codex$/{n=NR} END{print n}' "$tmp/out.log")
 sed -n "${N},\$p" "$tmp/out.log"
 ```
 
-## Step 4: 輪數與收斂
+## Step 4: 輪數與收斂 —— 交給 `review-state.mjs`
 
-> **每階段獨立計數**：R1 = 初審，修正後 R2、R3。**R3 仍有 BLOCKER ⇒ 停下來問 owner。**
-> 只有 `RC=0` 且內容完整的才算一輪；CLI 失敗另走**最多兩次** invocation-retry。
->
-> ⚠️ **跨 session 不支援 resume**（本流程不留持久狀態）。
-> 拿不到前一 session 的完整 findings 時，**不得聲稱逐項收口** ——
-> 只能當成新 run 從初審開始，或請 owner 貼上前輪內容。
+⚠️ **不要自己數輪數。** 「這算第幾輪」「這條算不算收口」「CLI 掛掉算不算一輪」
+三句都可以自我說服 —— 跟 F0 是同一個問題，所以同一個解法：機械化。
+
+```bash
+RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+
+$RS --start S3 --task "<這件事>"                    # 一個 run 開一次
+$RS --record S3 --rc "$rc" --log "$tmp/out.log"    # 每輪跑完立刻記
+$RS --resolve S3 --item B1 --how "<怎麼處理的>"      # 每修一條記一條
+$RS --prompt-block S3                              # 下一輪的 prompt 素材
+$RS --status S3                                    # green_allowed 在這裡看
+```
+
+| rc | 意思 |
+|---|---|
+| 0 | OK |
+| 10 | 沒有前輪狀態 ⇒ 這次是 R1 初審（**不是錯誤**） |
+| 20 | STOP_ASK_OWNER（R3 仍有 BLOCKER，或 invocation-retry 用完） |
+| 21 | REVIEW_ERROR（RC≠0 或回覆空）⇒ **這次不算一輪** |
+| 2 | 使用方式錯誤。含「回覆裡抓不到 BLOCKER/POLISH，無法判定還剩幾條」 |
+
+### 跨 session 現在可以接續了
+
+狀態在 `.claude/review-state.json`。換 session 直接 `--prompt-block <stage>`
+就拿得到「上一輪的 findings ＋ 我怎麼處理的 ＋ 上輪逐字回覆」。
+
+⚠️ 但 `rc=10` 時**不得聲稱逐項收口** —— 那代表真的沒有狀態，當成新 run 從初審開始。
+
+⚠️ 這**不是** owner 否決的那個 log。被否決的是遙測 / retro / 統計彙總。
+這裡存的是當前這一 run 的操作狀態，不跨 run 彙總、不算趨勢、run 結束就沒價值了。
 
 ---
 

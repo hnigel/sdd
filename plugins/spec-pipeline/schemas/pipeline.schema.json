@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hnigel/sdd/schemas/pipeline.schema.json",
+  "title": ".claude/pipeline.json",
+  "description": "spec-pipeline 的專案設定。缺這個檔（或缺 verify_cmd）⇒ fail-closed：只允許規劃與唯讀檢查，不得 GREEN。",
+  "type": "object",
+  "required": ["verify_cmd"],
+  "properties": {
+    "verify_cmd": {
+      "type": "string",
+      "minLength": 1,
+      "description": "必填。缺它就不可能驗證，也就不可能宣告 GREEN。"
+    },
+    "fast_path": {
+      "type": "object",
+      "required": ["allow_globs"],
+      "additionalProperties": false,
+      "description": "F0 快路的機械判定範圍。⚠️ 未知鍵一律報錯：allow 拼錯會 FULL（安全方向），deny 拼錯卻會讓整條 deny 靜默失效而放行。註解請用 `_` 開頭。",
+      "properties": {
+        "allow_globs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "只有命中這裡的路徑才可能走 fast。"
+        },
+        "deny_globs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "deny 優先於 allow。"
+        }
+      }
+    }
+  },
+  "_note": "頂層不設 additionalProperties:false —— 專案放自己的鍵（deploy_cmd 之類）是合理的，這個 plugin 不讀就是了。fast_path 內才嚴格，因為那裡是唯一 fail-open 的地方。"
+}

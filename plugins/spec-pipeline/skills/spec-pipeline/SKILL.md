@@ -96,7 +96,26 @@ S0 只給**建議**（`hard`→Fable、`normal`→Opus）。你打 `/fable` 或 
 然後**載入 `codex-review` skill**、走**模式 A**。
 （它是 skill 不是斜線指令 —— 沒有 `/codex-review` 這個東西。）
 
-⚠️ **S3 不 GREEN 不進 Step 4。**
+輪數與收口狀態由腳本持有，**不要自己數**：
+
+```bash
+RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+$RS --start S3 --task "<這件事>"        # 開一輪新的
+# … 跑 codex，拿到 $tmp/out.log 與 rc …
+$RS --record S3 --rc "$rc" --log "$tmp/out.log"
+$RS --resolve S3 --item B1 --how "<怎麼處理的>"   # 每修一條就記一條
+$RS --prompt-block S3                  # 產生下一輪要貼的「上輪 findings + 我的處理」
+```
+
+⚠️ **S3 不 GREEN 不進 Step 4。** GREEN 的判定看 `--status S3` 的 `green_allowed`。
+
+S3 收口之後**凍結規格**：
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" --freeze <規格檔>
+```
+
+從這裡開始，那份規格是唯一驗收依據。
 
 ## Step 4 — S4 實作
 
@@ -113,8 +132,17 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --verify-scope .claude
 
 ## Step 5 — 驗證 + S5 Codex 審程式碼
 
-跑 `pipeline.json` 的 `verify_cmd`，**RC 寫檔再讀**。
-然後**載入 `codex-review` skill**、走模式 A 審 code。
+先確認規格沒有被偷偷改過：
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" --check
+```
+
+`rc=20`（SPEC_DRIFT）⇒ **停下來**。規格被改成符合實作，是比「實作偏離規格」更隱蔽的失敗
+（見下方第 6 條）。
+
+然後跑 `pipeline.json` 的 `verify_cmd`，**RC 寫檔再讀**，
+再**載入 `codex-review` skill**、走模式 A 審 code（輪數一樣交給 `review-state.mjs`，stage 用 `S5`）。
 
 ---
 
@@ -144,23 +172,53 @@ S1 的規劃者**就是主對話**，也是唯一從頭到尾都在的角色。�
 
 收到回報之後，監督者**自己抽驗**至少一項，不要全盤採信。
 
-### 第 6 條特別容易違反
+### 第 6 條特別容易違反 —— 所以給它一條便宜的路
 
-任務中途發現規格有錯時，最省事的做法是**就地改實作**——但那會讓規格從此對不上現實，
-下一輪 review 就會拿一份過期的規格來審。**回去改規格，再往下走。**
+任務中途發現規格有錯時，最省事的做法是**就地改實作**（或更糟：把規格改成符合實作）。
+那不是紀律問題，是**成本問題**：誠實的路比偷懶的路貴十倍時，規則就是在跟人性對賭。
+
+⇒ 改規格走這條，S3 **只複審 delta，不整份重審**：
+
+```bash
+SF="node ${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs"
+# 直接編輯規格檔，然後：
+$SF --revise <規格檔> --why "<為什麼規格要改>"
+$SF --delta            # 把這段貼進 S3 複審的 prompt
+```
+
+⚠️ **不要跳過 `--revise` 直接改規格檔** —— `--check` 會判 `SPEC_DRIFT` 並擋下來。
+那個檢查存在的理由：把規格追認成實作的樣子，會讓下一輪 review 拿一份已經被追認過的
+規格來審，然後理所當然地通過。**那是全流程最隱蔽的假綠。**
 
 ---
-## 輪數與停止
+## 輪數與停止 —— 交給 `review-state.mjs`，不要自己數
 
-> 每階段獨立計數：R1 初審、R2/R3 修正後複審。**R3 仍有 BLOCKER ⇒ 停下來問 owner。**
-> 只有 `RC=0` 且回應完整才算一輪；CLI 失敗另走**最多兩次** invocation-retry。
->
-> ⚠️ **跨 session 不支援 resume**（本流程不留持久狀態）。拿不到前輪完整 findings 時，
-> **不得聲稱逐項收口** —— 當成新 run 從初審開始，或請 owner 貼上前輪內容。
+⚠️ 「這算第幾輪」「這條算不算收口」「這次 CLI 掛掉算不算一輪」**三句都可以自我說服**。
+跟 F0 同一個理由：寫在散文裡，實際數數的還是模型。
+
+規則（由腳本執行，不是由你判斷）：
+
+| 規則 | 腳本怎麼做 |
+|---|---|
+| 每階段獨立計數（S3 / S5） | 狀態按 stage 分開 |
+| 只有 `RC=0` 且回應非空才算一輪 | `--record` 遇到 RC≠0 或空回覆 ⇒ `rc=21`，**輪數不增加** |
+| CLI 失敗另走最多兩次 | 超過 ⇒ `rc=20` STOP_ASK_OWNER |
+| R3 仍有 BLOCKER ⇒ 停下來問 owner | `--record` 第三輪還有未收口 ⇒ `rc=20` |
+| 抓不到 BLOCKER/POLISH 格式 | `rc=2`，**不會因為抓不到就當作零** |
+
+### 跨 session
+
+狀態存在 `.claude/review-state.json` ⇒ **換 session 可以接續**：
+跑 `--prompt-block <stage>` 就拿得到前輪 findings 與我的處理。
+
+`rc=10`（沒有狀態）⇒ 這次就是 R1 初審，**不得聲稱逐項收口**。
 
 ## GREEN 的必要條件（同時成立）
 
-`verify_cmd` RC=0 ＋ Codex RC=0 且回應完整 ＋ 該階段無未處理 BLOCKER。
+`verify_cmd` RC=0 ＋ `review-state --status <stage>` 的 `green_allowed: true`
+＋（S5 才有）`spec-freeze --check` 回 `OK`。
+
+⚠️ 三個都是**腳本回答**的，不是你判斷的。
 
 ## 缺 `.claude/pipeline.json` 時（fail-closed）
 

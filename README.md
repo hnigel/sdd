@@ -15,6 +15,9 @@
 | `spec-pipeline` skill | **流程主體**（唯一來源）：F0 快路、S0 分級、S3/S5 兩道 Codex 閘門、輪數與停止條件 |
 | `codex-review` skill | 呼叫 Codex 的**單一來源**：模式選擇、環境釘死、RC 判讀、三條曾經寫錯的事實 |
 | `scripts/fast-eligibility.mjs` | F0 的**機械**判定（不呼叫任何模型） |
+| `scripts/review-state.mjs` | **輪數與收口狀態**。跨 session 可接續，R3 停止條件由它執行 |
+| `scripts/spec-freeze.mjs` | **凍結規格 + delta 複審**。偵測「把規格改成符合實作」 |
+| `schemas/pipeline.schema.json` | 設定形狀的**單一來源**：腳本與 CI 讀同一份 |
 
 ## 每個專案要放 `.claude/pipeline.json`
 
@@ -43,6 +46,17 @@
 ⚠️ 這條的重點不是擋 deploy，是擋**「猜錯驗證命令 → 在未驗證狀態下宣告 GREEN」**——
 那比 deploy 錯更糟，因為它製造假信心。
 
+## 四件事都機械化了（模型講不過去的東西才算數）
+
+| 該擋的 | 誰擋 | 講不過去的形式 |
+|---|---|---|
+| 這件事要不要走完整流程 | `fast-eligibility.mjs` | glob + git diff + exit code |
+| 現在第幾輪、能不能宣告 GREEN | `review-state.mjs` | 狀態檔 + `rc=20/21` |
+| 規格有沒有被偷偷改成符合實作 | `spec-freeze.mjs` | sha256 比對 + `rc=20` |
+| 設定與 plugin 形狀有沒有漂移 | `schemas/` + `scripts/validate-plugin.mjs` | CI |
+
+⇒ 這四個都曾經是散文。散文寫得再清楚，實際做判斷的還是模型。
+
 ## 三條設計原則（都是被 review 打回來才學到的）
 
 **① 「deterministic」寫在 Markdown 裡就不是 deterministic。**
@@ -55,8 +69,23 @@
 `--commit` / `--uncommitted` / `--base` **都與 PROMPT 互斥**（實測 `rc=2`）。
 ⇒ S3/S5 一律用 plain `codex exec ... - < prompt.txt`，在 prompt 裡自己寫死 target 與基準 SHA。
 
-**③ 不留持久狀態 ⇒ 跨 session 不支援 resume。**
-拿不到前一輪完整 findings 時，**不得聲稱逐項收口**。
+**③ 用免責聲明取代功能，是在騙自己。**
+原本 skill 寫「跨 session 不支援 resume ⇒ 不得聲稱逐項收口」——
+但「逐項核對上一輪」正是實測讓 R1→R5 變成一輪見底的手法，
+等於把最有效的手法建在一個會斷的地基上。
+⇒ `review-state.mjs` 把那一 run 的操作狀態存下來，換 session 接得回去。
+（這**不是**下面否決的那個 log —— 被否決的是遙測與統計彙總，不是操作狀態。）
+
+## 開發
+
+零依賴，不需要 `npm install`：
+
+```bash
+node --test plugins/spec-pipeline/tests/*.test.mjs   # 44 個 case
+node scripts/validate-plugin.mjs                     # manifest / frontmatter / 引用 / schema
+```
+
+CI 兩件都跑。改腳本一定要跑，並且**附負控組**（改壞 → 測試真的紅 → 還原）。
 
 ## 刻意不做
 

@@ -1,0 +1,8 @@
+{
+  "verify_cmd": "npm run verify",
+  "fast_path": {
+    "_comment": "deny 優先於 allow。起得越窄越好 —— 寧可漏放不要誤放。`_` 開頭的鍵是註解。",
+    "allow_globs": ["docs/**", "plan/**", "*.md"],
+    "deny_globs": ["**/migrations/**", "**/*secret*", "**/pipeline.json", "**/CLAUDE.md"]
+  }
+}
