@@ -60,6 +60,9 @@ function usage(msg) {
   process.exit(2);
 }
 
+/** `fast_path` 認得的鍵。`_` 開頭視為註解（既有設定用 `_comment` 寫理由）。 */
+const FAST_PATH_KEYS = new Set(['allow_globs', 'deny_globs']);
+
 function loadConfig() {
   if (!fs.existsSync(CONFIG)) return { err: '缺 .claude/pipeline.json' };
   let cfg;
@@ -71,6 +74,18 @@ function loadConfig() {
   if (!fp || !Array.isArray(fp.allow_globs) || fp.allow_globs.length === 0) {
     return { err: '缺 fast_path.allow_globs' };
   }
+  // ⚠️ 這一段擋的是**唯一一個 fail-open 的洞**：
+  //    `deny_globs` 拼錯（例如 `denyGlobs`）時，舊版是「不是陣列就當空陣列」——
+  //    deny 整條靜默失效，敏感路徑會因為符合 allow 而拿到 FAST，且沒有任何訊號。
+  //    allow 拼錯會 FULL（安全），deny 拼錯卻會放行，方向剛好相反。
+  //    ⇒ 未知鍵一律當**設定錯誤**（rc=2）讓人看見，而不是默默降級。
+  for (const k of Object.keys(fp)) {
+    if (k.startsWith('_')) continue;
+    if (!FAST_PATH_KEYS.has(k)) {
+      return { fatal: `fast_path 有未知鍵 "${k}"（認得的只有 ${[...FAST_PATH_KEYS].join(' / ')}；`
+        + '註解請用 `_` 開頭）。拼錯 deny_globs 會讓整條 deny 靜默失效，所以這裡不放行' };
+    }
+  }
   return { cfg, allow: fp.allow_globs, deny: Array.isArray(fp.deny_globs) ? fp.deny_globs : [] };
 }
 
@@ -81,8 +96,9 @@ function check(paths) {
   const reasons = [];
   if (paths.length === 0) usage('--check 需要明確的候選路徑（不接受「自己去找」）');
 
-  const { err, allow, deny } = loadConfig();
-  if (err) fail([err]);   // 缺設定 ⇒ FULL，不是 FAST
+  const { err, fatal, allow, deny } = loadConfig();
+  if (fatal) usage(fatal);   // 設定寫錯 ⇒ 人要去修，不能默默降級成 FULL
+  if (err) fail([err]);      // 缺設定 ⇒ FULL，不是 FAST
 
   if (paths.length > MAX_FILES) reasons.push(`候選檔數 ${paths.length} > ${MAX_FILES}`);
 
@@ -101,13 +117,20 @@ function check(paths) {
 
   if (reasons.length) fail(reasons);
 
-  // baseline：記下入場時的 blob hash，S4 之後用它算真正屬於本次的 diff
+  // baseline：記下入場時的 commit，S4 之後用它算真正屬於本次的 diff
   const head = git(['rev-parse', 'HEAD']).trim();
   // ⚠️ 進場時**既有的** untracked 檔要記下來 —— 否則 S4 之後會把它們誤判成
   //    「入場後新增的 scope 外路徑」。實測時就是這樣紅的（腳本把自己的產物也算進去了）。
   let untrackedAtEntry = [];
   try {
     untrackedAtEntry = git(['ls-files', '--others', '--exclude-standard']).trim().split('\n').filter(Boolean);
+  } catch { /* ignore */ }
+  // ⚠️ 同理，**入場時就已經改過的 tracked 檔**也要記下來。
+  //    進場檢查只掃候選路徑（scope 外本來就跟本次無關），但 --verify-scope 掃全樹 ——
+  //    不記的話，一個與本次無關的髒檔會讓「完全守規矩的實作」在做完之後才被踢回 full。
+  let dirtyAtEntry = [];
+  try {
+    dirtyAtEntry = git(['diff', '--name-only', 'HEAD']).trim().split('\n').filter(Boolean);
   } catch { /* ignore */ }
   const baseline = {
     created_at: new Date().toISOString(),
@@ -116,7 +139,7 @@ function check(paths) {
     max_files: MAX_FILES,
     max_lines: MAX_LINES,
     untracked_at_entry: untrackedAtEntry,
-    blobs: Object.fromEntries(paths.map((p) => [p, git(['hash-object', p]).trim()])),
+    dirty_at_entry: dirtyAtEntry,
   };
   const out = path.join(ROOT, '.claude', 'fast-baseline.json');
   fs.writeFileSync(out, JSON.stringify(baseline, null, 2));
@@ -130,34 +153,46 @@ function verifyScope(baselineFile) {
   const b = JSON.parse(fs.readFileSync(baselineFile, 'utf8'));
   const reasons = [];
 
+  if (!b.head) usage('baseline 缺 head —— 重跑 --check 產生一份新的');
+
+  // ⚠️⚠️ 基準是**入場時記下的 commit**，不是 `HEAD`。
+  //    用 HEAD 的話，implementer 只要 commit，這裡就看不到任何 diff ——
+  //    回報 `{"verdict":"fast","files":0,"lines":0}` rc=0，scope 外的改動一個都抓不到。
+  //    那是假綠，而且假在整個 F0 唯一要防的那件事上。
   // numstat：新增 刪除 路徑。binary 會是 "-\t-\t路徑"
   let numstat = '';
-  try { numstat = git(['diff', '--numstat', '--find-renames', 'HEAD', '--']).trim(); }
-  catch (e) { fail([`git diff 失敗: ${e.message}`]); }
+  try { numstat = git(['diff', '--numstat', '--find-renames', b.head, '--']).trim(); }
+  catch (e) { fail([`git diff 失敗（入場 commit ${b.head} 還在嗎？rebase 過就要重跑 --check）: ${e.message}`]); }
 
   const rows = numstat ? numstat.split('\n').map((l) => l.split('\t')) : [];
-  const touched = rows.map((r) => r[2]);
 
   // 入場後新增的 scope 外路徑（含 untracked）一律超界
   let untracked = [];
   try { untracked = git(['ls-files', '--others', '--exclude-standard']).trim().split('\n').filter(Boolean); }
   catch { /* ignore */ }
 
-  // 排除三種**不是本次任務造成**的東西，否則會永遠紅：
-  //   ① 候選路徑本身  ② 進場時就已經存在的 untracked  ③ 本腳本自己的產物
-  const entryUntracked = new Set(b.untracked_at_entry ?? []);
-  const SELF = new Set(['.claude/fast-baseline.json']);
-  const outOfScope = [...touched, ...untracked].filter(
-    (p) => p && !b.paths.includes(p) && !entryUntracked.has(p) && !SELF.has(p),
-  );
+  // 排除四種**不是本次任務造成**的東西，否則會永遠紅：
+  //   ① 進場時就存在的 untracked  ② 進場時就已經改過的 tracked  ③ 本腳本自己的產物
+  //   （④ 候選路徑本身不算超界，但**要**計入行數/檔數，所以另外處理）
+  const preExisting = new Set([
+    ...(b.untracked_at_entry ?? []),
+    ...(b.dirty_at_entry ?? []),
+    '.claude/fast-baseline.json',
+  ]);
+
+  const relevant = rows.filter((r) => r[2] && !preExisting.has(r[2]));
+  const touched = relevant.map((r) => r[2]);
+  const outOfScope = [...new Set(
+    [...touched, ...untracked.filter((p) => !preExisting.has(p))].filter((p) => p && !b.paths.includes(p)),
+  )];
   if (outOfScope.length) reasons.push(`scope 外的變更: ${outOfScope.join(', ')}`);
 
   let total = 0;
-  for (const [add, del, p] of rows) {
+  for (const [add, del, p] of relevant) {
     if (add === '-' || del === '-') { reasons.push(`${p} 是 binary`); continue; }
     total += Number(add) + Number(del);
   }
-  if (rows.some((r) => r[2] && r[2].includes('=>'))) reasons.push('偵測到 rename');
+  if (touched.some((p) => p.includes('=>'))) reasons.push('偵測到 rename');
   if (touched.length > b.max_files) reasons.push(`實際改動檔數 ${touched.length} > ${b.max_files}`);
   if (total > b.max_lines) reasons.push(`實際變更行數 ${total}（新增+刪除） > ${b.max_lines}`);
 

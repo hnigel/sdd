@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "spec-pipeline",
-      "description": "F0 快路判定（機械式）+ /sdd 主流程 + codex-review 呼叫契約。跨專案，靠 .claude/pipeline.json 吸收專案差異。",
+      "description": "F0 快路判定（機械式）+ /fable /opus 主流程 + codex-review 呼叫契約。跨專案，靠 .claude/pipeline.json 吸收專案差異。",
       "version": "0.1.0",
       "author": {
         "name": "hnigel"

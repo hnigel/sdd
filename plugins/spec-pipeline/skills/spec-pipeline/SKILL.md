@@ -1,6 +1,6 @@
 ---
 name: spec-pipeline
-description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex 審程式碼。流程主體，由 /fable、/opus、/task 帶入指定的規劃模型
+description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex 審程式碼。流程主體，由 /fable、/opus 帶入指定的規劃模型
 ---
 
 
@@ -16,15 +16,16 @@ description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex �
 
 ## 指定的規劃模型
 
-呼叫端（`/fable` / `/opus` / `/task`）會告訴你**這件事該用哪個模型規劃**。
+呼叫端（`/fable` / `/opus`）會告訴你**這件事該用哪個模型規劃**。
+**兩個入口都在斷言模型 —— 沒有「不指定」這條路。**
 
 ⚠️ **我不能切換自己的模型。** 主對話的模型只有 owner 能切（`/model`）。
 
 | 情況 | 做什麼 |
 |---|---|
 | 指定的模型 **== 當前模型** | 直接往下走 |
-| 指定的模型 **≠ 當前模型** | **停下來請 owner 切**。不得用錯的模型硬規劃 |
-| **沒指定**（`/task`） | S0 給建議並**問** owner，不自己決定 |
+| 指定的模型 **≠ 當前模型** | **停下來請 owner 切**（`/model`）。不得用錯的模型硬規劃 |
+| 指定的模型 **與 S0 判定不一致** | **講一聲，然後照指定的做**（見 Step 1）。這是唯一的難度訊號，不得省略 |
 
 ⇒ 研究（S1r）不受影響 —— 那本來就是派 Sonnet subagent，設得動。
 
@@ -42,7 +43,7 @@ description: 分級規劃 → 規格 → Codex 審規格 → 實作 → Codex �
 
 ⚠️ **scope 未知 = 風險未知 ⇒ 一定 FULL。** F0 刻意不接受「你自己去找要改哪些檔」——
 那等於把機械判定變回語意判斷。所以調查型任務**沒有路徑可給**，這不是錯誤，
-是「它本來就該走完整流程」。（`rc=2` 是**用法錯誤**，不要拿它當「再試一次」的訊號。）
+是「它本來就該走完整流程」。（`rc=2` 是**用法或設定錯誤**，不要拿它當「再試一次」的訊號。）
 
 ### 知道路徑時
 
@@ -54,7 +55,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --check <path...>
 |---|---|---|
 | **0** | FAST | 跳到 **Step 4**（單一 implementer，不拆平行 agent） |
 | **10** | FULL | 往下走 Step 1 |
-| **2** | 用法錯誤（例如沒給路徑） | **不要**猜路徑重試 —— 回到上面那張表，當成調查型走 FULL |
+| **2** | 用法**或設定**錯誤 | **先讀 stderr**。設定寫錯（例如 `fast_path` 有未知鍵）⇒ 回報 owner 去修，**不要繞過**；沒給路徑 ⇒ 回上表當調查型走 FULL。兩種都**不要**猜路徑重試 |
 
 使用者帶 `--full` ⇒ 直接走 FULL，不跑 F0。
 
@@ -75,11 +76,15 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --check <path...>
 - 「已失敗兩輪」**不是**初始特徵 ⇒ 觸發 **retriage** 並升級 hard
 - 單純玩家可見文字／樣式／局部數值**不因「玩家可見」自動變 hard**
 
-S0 只給**建議**（`hard`→Fable、`normal`→Opus）。
-- 你已經用 `--fable` / `--opus` 指定了 ⇒ **照你的**。
-  ⚠️ 但**指定與建議不一致時要講一聲**（例如你指定 Opus、S0 判 `hard`）——
-  那個不一致本身就是訊號，可能代表這件事比你以為的複雜。講完照你的做，不要擅自改。
-- 你沒指定 ⇒ 我講出建議並**問你要不要切**，不自己決定
+S0 只給**建議**（`hard`→Fable、`normal`→Opus）。你打 `/fable` 或 `/opus` 就是已經指定，
+**照你的做，不要擅自改。**
+
+⚠️ **但指定與建議不一致時一定要講一聲**（例如你打 `/opus`、S0 判 `hard`）——
+那個不一致本身就是訊號，可能代表這件事比你以為的複雜。
+既然沒有「不指定」的入口，**這句提醒就是整個流程唯一的難度訊號**，不得省略。
+
+⚠️ retriage 升級成 `hard` 時（上面「已失敗兩輪」那條），若當前是 Opus ⇒
+**停下來請 owner 切 Fable 再重跑規劃**，不要用 Opus 硬接一個已經判 hard 的任務。
 
 ## Step 2 — S1 規劃（＋ S1r 研究）
 
@@ -87,7 +92,9 @@ S0 只給**建議**（`hard`→Fable、`normal`→Opus）。
 
 ## Step 3 — S2 規格 → S3 Codex 審規格
 
-寫成文件（位置照專案慣例，例如 `plan/<主題>/design-<日期>.md`），然後用 `/codex-review` **模式 A**。
+寫成文件（位置照專案慣例，例如 `plan/<主題>/design-<日期>.md`），
+然後**載入 `codex-review` skill**、走**模式 A**。
+（它是 skill 不是斜線指令 —— 沒有 `/codex-review` 這個東西。）
 
 ⚠️ **S3 不 GREEN 不進 Step 4。**
 
@@ -107,7 +114,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/fast-eligibility.mjs" --verify-scope .claude
 ## Step 5 — 驗證 + S5 Codex 審程式碼
 
 跑 `pipeline.json` 的 `verify_cmd`，**RC 寫檔再讀**。
-然後 `/codex-review` 模式 A 審 code。
+然後**載入 `codex-review` skill**、走模式 A 審 code。
 
 ---
 

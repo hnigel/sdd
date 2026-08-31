@@ -11,7 +11,7 @@
 
 | 東西 | 用途 |
 |---|---|
-| `/fable` `/opus` `/task` | 三個薄指令，只帶入「這件事該用哪個模型規劃」 |
+| `/fable` `/opus` | 兩個薄指令，只帶入「這件事該用哪個模型規劃」 |
 | `spec-pipeline` skill | **流程主體**（唯一來源）：F0 快路、S0 分級、S3/S5 兩道 Codex 閘門、輪數與停止條件 |
 | `codex-review` skill | 呼叫 Codex 的**單一來源**：模式選擇、環境釘死、RC 判讀、三條曾經寫錯的事實 |
 | `scripts/fast-eligibility.mjs` | F0 的**機械**判定（不呼叫任何模型） |
@@ -21,14 +21,20 @@
 ```jsonc
 {
   "verify_cmd": "npm run verify",        // 必填。缺它就 fail-closed
-  "deploy_cmd": "npm run deploy",
-  "commit_policy": "explicit-files",
   "fast_path": {
     "allow_globs": ["docs/**", "*.md"],
-    "deny_globs":  ["**/migrations/**", "**/*secret*"]   // deny 優先於 allow
+    "deny_globs":  ["**/migrations/**", "**/*secret*"],  // deny 優先於 allow
+    "_comment": "`_` 開頭的鍵是註解，可以自由加"
   }
 }
 ```
+
+⚠️ **`fast_path` 裡出現未知鍵一律 `rc=2`（設定錯誤），不會默默降級。**
+理由：`allow_globs` 拼錯會 FULL（安全方向），`deny_globs` 拼錯卻會讓整條 deny
+靜默失效、敏感路徑拿到 FAST —— 方向剛好相反。這是唯一一個 fail-open 的洞，所以堵死。
+（想寫註解就用 `_` 開頭，那些鍵會被略過。）
+
+其他鍵（`deploy_cmd`、`commit_policy` 之類）不會被這個 plugin 讀，放著無妨。
 
 **缺這個檔（或缺 `verify_cmd`）時 fail-closed**：只允許規劃與唯讀檢查，
 **不得進實作、不得修改任何檔案**，結果只能是 `BLOCKED_UNCONFIGURED` / `UNVERIFIED`，
