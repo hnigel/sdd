@@ -35,7 +35,22 @@
 
 結構教訓（run1-R3 診斷）：**每輪補丁本身開出新的未審表面**——findings 全集中打「最新加上去的那層」，7→4→5 不收斂；churn 全部集中在「怎麼判定 GREEN」。收斂訊號是「連續多輪無人反對」，不是輪數。
 
-## 3. VERDICT 設計與 run2-R3 實地結果（最新狀態）
+## 3. VERDICT 設計與 run2-R3 實地結果 —— ⚠️ **已被外部證據否定，勿照做**
+
+> **2026-09-01 補：`green_allowed = 最後一輪 VERDICT SHIP` 這個設計不成立。**
+> Greptile 團隊公開記載他們試過同一件事（讓 LLM 判斷自己產出的意見重不重要），
+> 原文逐字：**「the LLMs judgment of its own output was nearly random」**，
+> 並且「we simply could not get the LLM to produce fewer nits without also producing
+> fewer critical comments」——嚴重度不是可獨立調的旋鈕，壓瑣碎意見會連critical一起壓掉。
+> 來源：https://news.ycombinator.com/item?id=42451968 （已逐字覆核）
+>
+> 他們的成功解法是 embedding + KNN 比對歷史人工反饋，**判斷邏輯是統計的、不是再一次 LLM 推理**。
+> 我們建不起那個資料集（一人使用量到不了統計門檻——與「刻意不做遙測」同一理由）。
+>
+> ⇒ **保留本節是為了記錄死因，不是為了日後照做。** 正確方向見 §3b。
+> 唯一存活的部分是 `[FAIL]` 欄位（見 §3b 的 Verification bar），那條被外部獨立驗證有效。
+
+## 3. VERDICT 設計與 run2-R3 實地結果（原始設計，供對照）
 
 **v6 設計要點**（被拆分擱置，非被完整否決）：哨兵區塊首個非空行 `VERDICT SHIP|BLOCK`（缺漏/其他值 rc=2）；green = 最後一輪 SHIP；SHIP 併列 B 行 ⇒ rc=2（逼審查者顯式降級）；B 行必帶 `[FAIL] <輸入/狀態> -> <錯誤結果>` 欄位，腳本只驗存在不判品質，缺欄位在編號驗證後降級 POLISH（記 `demoted_from_blocker`）；MAX_ROUNDS=3 降為預算警報（R3+ 且 BLOCK ⇒ 記錄後 exit 20「預算用完問 owner」；SHIP 任何輪 rc=0）；人工 `--blockers` 輪無 VERDICT ⇒ 永不 SHIP。
 
@@ -48,6 +63,66 @@
 - **B3/B4**：同輪打 VERDICT 層；逐字未傳遞至本檔——完整原文在監督者備份的 review-state（狀態檔會被 `--start` 覆蓋，監督者已另存）。
 - **P1（採納）**：輪數預算警報**不能**算「錯誤 SHIP」的緩解——它只在 BLOCK 時觸發，SHIP 直接通過，兩者防的不是同一件事。日後論證緩解時不得再引它。
 - **P2（採納，用詞修正）**：VERDICT 的正確描述是「**沒有新增 trusted principal，但擴大了 trusted proposition**」——信任的主體不變（仍是異廠商 Codex，非規格作者），但被信任的命題從「它列的 BLOCKER 清單」擴大為「它的出貨裁決」。這比「不是新增信任」準確。日後規格照此措辭。
+
+## 3b. 前案：別人怎麼解「審不完」——**核心診斷是角色沒有分離**
+
+⚠️ **這一節是這份文件最重要的部分。** 它把「我們的問題」從「需要發明一個機制」
+改寫成「我們漏了一個所有成熟審查制度都有的角色分離」。
+
+### 診斷：審查者兼任了裁決者
+
+我們的系統裡，Codex 的 findings **直接等於**放行判準（零 BLOCKER 才放行）。
+也就是說審查者同時是編輯。**每一個成熟的審查制度都把這兩個角色分開**：
+
+| 制度 | 分離方式 | 逐字出處 |
+|---|---|---|
+| 學術期刊（ICMJE） | 審稿人只有建議權 | 「A peer-reviewed journal is... **under no obligation to follow reviewer recommendations**, favorable or negative.」「The editor... is ultimately responsible」<br>icmje.org/recommendations |
+| PLOS ONE | 編輯裁決哪些意見必須處理 + 輪數上限 | 「**Aim for no more than two rounds of revision** before a final decision.」編輯需「Determine which comments **must** be addressed... and which are non-essential」 |
+| Kubernetes | 阻擋的預設值反轉 | 「**Avoid clicking the "Request changes" button**」「If you want to block a PR... leave a `/hold` comment. **Mention why**... optionally specify the conditions under which the hold can be removed」<br>kubernetes.io/docs/contribute/review/reviewing-prs/（已逐字覆核）<br>另 `/lgtm`（品質）與 `/approve`（合併授權）是兩個獨立訊號，後者限 OWNERS：kubernetes.dev/docs/guide/owners/ |
+| LLVM | 退出阻擋要顯式聲明 | 「If you review a patch but **don't intend for the review process to block on your approval, please state that explicitly**.」 |
+| Claude Code 官方 review | 生成式模型**不做裁決** | 「Findings are tagged by severity and **don't approve or block your PR**」「The check run **always completes with a neutral conclusion** so it never blocks merging」<br>裁決交給非生成式規則層：吐 `{"normal":2,"nit":1,"pre_existing":0}` 讓你自己的 CI 決定<br>code.claude.com/docs/en/code-review（已逐字覆核） |
+| FDA 510(k) | 承認缺陷數無上限，改用 delta 收斂 | 「there is **no limit to the number of deficiencies** that FDA may generate」但「Any subsequent deficiencies will be **limited to issues raised by the information provided by the applicant in its response**」 |
+| Google | 放行判準不是完美 | 「reviewers should **favor approving** a CL once it is in a state where it definitely improves the overall code health... **even if the CL isn't perfect**」「there is no such thing as 'perfect' code—there is only *better* code」 |
+
+**最有話語權的那一方（Anthropic 自己的 code review 產品）明確拒絕讓生成式模型當閘門。**
+這比任何論證都強。
+
+### 可直接機械化的機制（腳本只驗形式，不判品質）
+
+| 機制 | 出處 | 對我們的意義 |
+|---|---|---|
+| **findings 帶 blocking / non-blocking 標記** | Conventional Comments：「(non-blocking): ... **should not** prevent the subject under review from being accepted」；Google `Nit:`；COPE 要求分「essential」與「strengthen」 | 放行判準改成「有沒有未解決的 blocking 項」，而非「意見數是否為零」 |
+| **阻擋要顯式 + 附理由 + 附解除條件** | Kubernetes `/hold` | 卡關不能是預設姿態 |
+| **後續輪只審 delta** | FDA：subsequent deficiencies limited to responses | 直接解掉「新機制製造新表面」的正回饋 |
+| **第一輪之後機械降級** | Claude Code REVIEW.md「**after the first review, suppress new nits and post Important findings only**」——原文明講這是為了「stops a one-line fix from **reaching round seven** on style alone」 | 逐字命中我們的病 |
+| **低嚴重度數量上限** | 同上「report at most five nits, mention the rest as a count」；原文並直言「**Prose and config files can be polished forever**」 | 我們審的正是一份 markdown |
+| **Verification bar** | 同上「behavior claims need a `file:line` citation in the source, not an inference from naming」 | **我們的 `[FAIL]` 欄位是獨立想到同一件事，這條存活** |
+| **審查強度分檔** | 同上「At `low` and `medium`, the review reports only the findings it's **most confident in**... `high` through `max` broaden coverage and **may include findings the review is less sure about**」 | 我們每一輪都跑 xhigh，等於主動選最會找碴的檔位再對它零容忍 |
+
+### `MAX_ROUNDS` 的意義要重寫
+
+現在 R3 的 `rc=20` 問 owner 的是「**還要不要繼續？**」——那是計數器超時。
+
+依 PLOS/ICMJE 模式，輪數上限的作用應該是**把裁決權交給編輯角色**，所以該問的是：
+**「剩下這些意見，哪幾條夠格擋關？」**
+
+⇒ **owner 本來就是編輯，流程已經把對的人放在對的位置，只是問錯了問題。**
+這是這份文件裡成本最低、槓桿最高的一個改動。
+
+### 這個失敗模式有名字
+
+AutoGPT 案例研究把它記載為已知失敗模式（vectara/awesome-agent-failures）：
+「write code → test it → find minor improvements → rewrite entirely → find different
+improvements → repeat」，根因之一逐字：**「no concept of 'good enough' completion criteria」**。
+
+另有實證支持「無外部真值來源的自我修正會讓品質下降」（arXiv:2310.01798，
+CommonSenseQA 上 GPT-3.5 自我修正後 75.8% → 38.1%）。
+
+### 找不到的（誠實記錄）
+
+- **沒有**任何軟體工程論文給出「超過 N 輪後 review 邊際價值趨近零」的量化曲線。
+  既有的邊際遞減證據（Cisco/SmartBear）講的是**單次審查時長與速度**，不是輪次，兩者不同軸。
+- **沒有**人把「裁決/列問題分離」系統性寫成 code review 方法論發表。業界普遍在做，但未被命名。
 
 ## 4. 四個已知未守的缺口（v6-§7 全文遷入）
 
