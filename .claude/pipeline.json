@@ -1,0 +1,8 @@
+{
+  "verify_cmd": "node scripts/validate-plugin.mjs && node --test plugins/spec-pipeline/tests/*.test.mjs",
+  "fast_path": {
+    "_comment": "只有根目錄的 .md（README / HANDOFF）算純文件。plugins/**/*.md 是 skill 與 command 本體，改它就是改流程行為 ⇒ 一律 FULL。單一 * 不跨 /，所以 *.md 不會命中 skills/**。",
+    "allow_globs": ["*.md"],
+    "deny_globs": ["**/CLAUDE.md", "**/pipeline.json"]
+  }
+}

@@ -1,2 +1,7 @@
 .DS_Store
 node_modules/
+
+# spec-pipeline 的執行狀態檔（spec-freeze 會存整份規格內容，尤其不該進版控）
+.claude/fast-baseline.json
+.claude/review-state.json
+.claude/spec-freeze.json
