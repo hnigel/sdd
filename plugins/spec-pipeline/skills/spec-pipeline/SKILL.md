@@ -99,13 +99,16 @@ S0 只給**建議**（`hard`→Fable、`normal`→Opus）。你打 `/fable` 或 
 輪數與收口狀態由腳本持有，**不要自己數**：
 
 ```bash
-RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
-$RS --start S3 --task "<這件事>"        # 開一輪新的
+rs() { node "${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs" "$@"; }
+rs --start S3 --task "<這件事>"        # 開一輪新的
 # … 跑 codex，拿到 $tmp/out.log 與 rc …
-$RS --record S3 --rc "$rc" --log "$tmp/out.log"
-$RS --resolve S3 --item B1 --how "<怎麼處理的>"   # 每修一條就記一條
-$RS --prompt-block S3                  # 產生下一輪要貼的「上輪 findings + 我的處理」
+rs --record S3 --rc "$rc" --log "$tmp/out.log"
+rs --resolve S3 --item B1 --how "<怎麼處理的>"   # 每修一條就記一條
+rs --prompt-block S3                  # 產生下一輪要貼的「上輪 findings + 我的處理」
 ```
+
+⚠️ **用 function，不要用 `RS="node ..."` 然後 `$RS --flag`** —— 後者依賴 shell 分詞，
+**zsh 預設不分詞**，而 macOS 預設 shell 是 zsh。詳見 `codex-review` skill 同一段。
 
 ⚠️ **S3 不 GREEN 不進 Step 4。** GREEN 的判定看 `--status S3` 的 `green_allowed`。
 
@@ -180,10 +183,10 @@ S1 的規劃者**就是主對話**，也是唯一從頭到尾都在的角色。�
 ⇒ 改規格走這條，S3 **只複審 delta，不整份重審**：
 
 ```bash
-SF="node ${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs"
+sf() { node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" "$@"; }
 # 直接編輯規格檔，然後：
-$SF --revise <規格檔> --why "<為什麼規格要改>"
-$SF --delta            # 把這段貼進 S3 複審的 prompt
+sf --revise <規格檔> --why "<為什麼規格要改>"
+sf --delta            # 把這段貼進 S3 複審的 prompt
 ```
 
 ⚠️ **不要跳過 `--revise` 直接改規格檔** —— `--check` 會判 `SPEC_DRIFT` 並擋下來。

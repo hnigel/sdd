@@ -167,7 +167,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-config.mjs"
 零依賴，不需要 `npm install`：
 
 ```bash
-node --test plugins/spec-pipeline/tests/*.test.mjs   # 44 個 case
+node --test plugins/spec-pipeline/tests/*.test.mjs   # pre-push 會印實際通過數
 node scripts/validate-plugin.mjs                     # manifest / frontmatter / 引用 / schema
 ```
 

@@ -39,6 +39,28 @@ for (const entry of market.plugins) {
   };
   const rel = (f) => path.relative(ROOT, f);
 
+  /**
+   * skill 裡的 shell 片段是給模型照抄執行的，但沒有任何東西在守它 ——
+   * 直到 2026-09-01 才發現兩份 SKILL.md 共 14 行用 `RS="node ..."` 然後 `$RS --flag`，
+   * 那要 shell 對未加引號的展開做分詞：bash 會，**zsh 預設不會**，而 macOS 預設是 zsh。
+   * 這個 lint 守的是**已知的不可攜模式**，不是完備性證明。
+   * 只掃 bash/sh 標記的 fenced block —— 其他語言的 `$VAR` 開頭是合法的。
+   */
+  function lintShell(file, label) {
+    const lines = fs.readFileSync(file, 'utf8').split('\n');
+    let inShell = false;
+    lines.forEach((line, i) => {
+      const fence = /^\s*```\s*(\S*)/.exec(line);
+      if (fence) { inShell = inShell ? false : /^(bash|sh|shell|zsh)$/.test(fence[1]); return; }
+      if (!inShell) return;
+      // 裸的純量展開當命令用：`$RS --status`
+      if (/^\s*\$[A-Za-z_][A-Za-z0-9_]*(\s|$)/.test(line)) {
+        bad(`${label}:${i + 1} 用 \`${line.trim().slice(0, 40)}\` 這種 \`$VAR --flag\` 寫法 `
+          + '—— zsh 預設不分詞，macOS 會原樣失敗。改用 shell function：`rs() { node "…" "$@"; }`');
+      }
+    });
+  }
+
   const skillsDir = path.join(dir, 'skills');
   if (fs.existsSync(skillsDir)) {
     for (const s of fs.readdirSync(skillsDir)) {
@@ -49,6 +71,7 @@ for (const entry of market.plugins) {
       if (!meta.name) bad(`${rel(f)} frontmatter 缺 name`);
       else if (meta.name !== s) bad(`${rel(f)} 的 name「${meta.name}」與目錄名「${s}」不一致`);
       if (!meta.description) bad(`${rel(f)} frontmatter 缺 description`);
+      lintShell(f, rel(f));
     }
   }
   const cmdDir = path.join(dir, 'commands');

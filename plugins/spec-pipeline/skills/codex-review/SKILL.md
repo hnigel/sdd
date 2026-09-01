@@ -135,14 +135,18 @@ sed -n "${N},\$p" "$tmp/out.log"
 三句都可以自我說服 —— 跟 F0 是同一個問題，所以同一個解法：機械化。
 
 ```bash
-RS="node ${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs"
+rs() { node "${CLAUDE_PLUGIN_ROOT}/scripts/review-state.mjs" "$@"; }
 
-$RS --start S3 --task "<這件事>"                    # 一個 run 開一次
-$RS --record S3 --rc "$rc" --log "$tmp/out.log"    # 每輪跑完立刻記
-$RS --resolve S3 --item B1 --how "<怎麼處理的>"      # 每修一條記一條
-$RS --prompt-block S3                              # 下一輪的 prompt 素材
-$RS --status S3                                    # green_allowed 在這裡看
+rs --start S3 --task "<這件事>"                    # 一個 run 開一次
+rs --record S3 --rc "$rc" --log "$tmp/out.log"    # 每輪跑完立刻記
+rs --resolve S3 --item B1 --how "<怎麼處理的>"      # 每修一條記一條
+rs --prompt-block S3                              # 下一輪的 prompt 素材
+rs --status S3                                    # green_allowed 在這裡看
 ```
+
+⚠️ **用 function，不要用 `RS="node ..."` 然後 `$RS --flag`。**
+那個寫法要 shell 對未加引號的展開做分詞：bash 會，**zsh 預設不會**（`SH_WORD_SPLIT` 關閉），
+而 macOS 的預設 shell 就是 zsh —— 在那裡它會原樣失敗。function 在 bash/zsh/POSIX sh 語意相同。
 
 | rc | 意思 |
 |---|---|

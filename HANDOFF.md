@@ -23,7 +23,7 @@ plugins/spec-pipeline/
 │   ├── validate-config.mjs              ← 照 schema 驗 pipeline.json
 │   └── lib/validate-config.mjs          ← 極小 schema 驗證器（零依賴）
 ├── schemas/pipeline.schema.json         ← 設定形狀的唯一來源
-└── tests/*.test.mjs                     ← 44 個 case，`node --test` 零依賴
+└── tests/*.test.mjs                     ← `node --test` 零依賴，數量不寫死
 scripts/validate-plugin.mjs              ← repo 自己的形狀檢查（不會被裝到使用者機器上）
 .githooks/pre-push                       ← push 前把上面兩件跑完，紅的擋下來
 ```
