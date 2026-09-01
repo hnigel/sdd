@@ -224,6 +224,84 @@ describe('⭐⭐ 契約不合就拒絕，絕不寬容', () => {
 
 // ⚠️ 舊版把 round 先 push 再判斷，且「零 BLOCKER ⇒ CLEAR」的分支排在上限檢查之前，
 // 所以 R3 停下來之後再送一次就成立 R4，上限檢查根本不會執行。
+// ⚠️ 輪數上限再機械，只要「重開一個 run」沒有代價，它就形同虛設 ——
+// 舊版 --start 只印一行 stderr 就把未收口的 run 蓋掉。
+describe('⭐⭐ 重開 run 要留痕', () => {
+  const seed = (dir) => {
+    run(dir, '--start', 'S3', '--task', 'A');
+    run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'l.log', TWO_BLOCKERS));
+  };
+
+  it('未收口時普通 --start ⇒ rc=2，且狀態逐位元組不變', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      const before = readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8');
+      const r = run(dir, '--start', 'S3', '--task', 'B');
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, /--force/);
+      assert.equal(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'), before);
+    } finally { cleanup(); }
+  });
+
+  it('--force 沒帶 --why ⇒ rc=2', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      const r = run(dir, '--start', 'S3', '--task', 'B', '--force');
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /--why/);
+    } finally { cleanup(); }
+  });
+
+  it('--force --why ⇒ 放行，並留下 restarted_over（含被蓋掉的 open_ids 與理由）', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      const r = run(dir, '--start', 'S3', '--task', 'B', '--force', '--why', '換方法');
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const ro = state(dir).stages.S3.restarted_over;
+      assert.equal(ro.task, 'A');
+      assert.equal(ro.rounds, 1);
+      assert.deepEqual(ro.open_ids, ['B1', 'B2']);
+      assert.equal(ro.why, '換方法');
+    } finally { cleanup(); }
+  });
+
+  // force restart 之後 rounds 是空的 —— 若守衛只看 rounds，
+  // 第二次普通 --start 就會把上面那筆痕跡無聲洗掉。
+  it('force 重開後，第二次普通 --start 仍被擋（痕跡不會被無聲洗掉）', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      run(dir, '--start', 'S3', '--task', 'B', '--force', '--why', 'x');
+      const r = run(dir, '--start', 'S3', '--task', 'C');
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+      assert.equal(state(dir).stages.S3.restarted_over.task, 'A');
+    } finally { cleanup(); }
+  });
+
+  it('零有效輪但 invocation-retry 用盡（STOP 狀態）也要 --force', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 'A');
+      const bad = log(dir, 'b.log', TWO_BLOCKERS);
+      run(dir, '--record', 'S3', '--rc', '1', '--log', bad);   // CLI 失敗，不算一輪
+      run(dir, '--record', 'S3', '--rc', '1', '--log', bad);
+      assert.equal(state(dir).stages.S3.rounds.length, 0);
+      const r = run(dir, '--start', 'S3', '--task', 'B');
+      assert.equal(r.status, 2, r.stdout + r.stderr);
+    } finally { cleanup(); }
+  });
+
+  it('乾淨狀態下 --start 不需要 --force', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      assert.equal(run(dir, '--start', 'S3', '--task', 'A').status, 0);
+    } finally { cleanup(); }
+  });
+});
+
 describe('⭐⭐ 輪數上限不可繞過', () => {
   it('達上限後再 --record ⇒ rc=20，且狀態逐位元組不變', () => {
     const { dir, cleanup } = sandbox();

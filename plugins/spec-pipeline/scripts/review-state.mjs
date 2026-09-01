@@ -46,7 +46,7 @@ const MAX_MANUAL_BLOCKERS = 50;  // --blockers 的上界。下界是 1：不得�
 function usage(msg) {
   console.error(`review-state: ${msg}`);
   console.error(`用法:
-  review-state.mjs --start <stage> --task "<描述>"
+  review-state.mjs --start <stage> --task "<描述>" [--force --why "<為什麼重開>"]
   review-state.mjs --record <stage> --rc <n> --log <file> [--blockers <n> --why "<理由>"]
   review-state.mjs --resolve <stage> --item <id> --how "<做法>"
   review-state.mjs --prompt-block <stage>
@@ -155,18 +155,61 @@ const lastRound = (st) => st.rounds[st.rounds.length - 1] ?? null;
 const openBlockers = (st) => (lastRound(st)?.blockers ?? []).filter((b) => !b.resolved);
 
 // ── --start ────────────────────────────────────────────────────────────
-function start(stage, task) {
+/**
+ * 前一個 run 是不是「還沒交代完」—— 三種都算，因為三種都代表有未了結的東西：
+ *   ① 跑過輪次（不論收口與否）
+ *   ② 本身就是一次 force restart 的結果（否則第二次普通 --start 就把痕跡洗掉了）
+ *   ③ invocation-retry 已用盡（零有效輪，但那是 STOP 狀態，不是乾淨起點）
+ */
+function unfinished(prev) {
+  if (!prev) return null;
+  if (prev.rounds?.length) return `已跑 ${prev.rounds.length} 輪，${openBlockers(prev).length} 條未收口`;
+  if (prev.restarted_over) return '本身是一次 --force 重開的結果，痕跡還在';
+  if ((prev.invocation_failures?.length ?? 0) >= MAX_INVOCATION_RETRY) {
+    return `invocation-retry 已用盡（${prev.invocation_failures.length}/${MAX_INVOCATION_RETRY}）⇒ STOP 狀態`;
+  }
+  return null;
+}
+
+function start(stage, task, force, why) {
   if (!task) usage('--start 需要 --task "<描述>"（用來確認狀態屬於這一 run，不是上一件事的殘留）');
   const s = load();
   const prev = s.stages[stage];
-  if (prev && prev.rounds.length) {
-    // 不靜默覆蓋：前一 run 沒收完就重開，是要讓人看見的事
-    console.error(`⚠️ ${stage} 原本有一個未結束的 run（task: ${prev.task}，已跑 ${prev.rounds.length} 輪，`
-      + `${openBlockers(prev).length} 條未收口）—— 已覆蓋。`);
+  const why_unfinished = unfinished(prev);
+
+  // ⚠️ 舊版只印一行 stderr 就覆蓋。那等於讓「重開一個 run」變成繞過輪數上限的
+  // 免費出口 —— 停止條件再機械，只要重置沒有代價就形同虛設。
+  if (why_unfinished) {
+    if (!force) {
+      console.error(`review-state: ${stage} 有一個未結束的 run（task: ${prev.task}；${why_unfinished}）。`);
+      console.error('要覆蓋它請明講：--start ' + stage + ' --task "…" --force --why "<為什麼重開>"');
+      console.error('⚠️ 重開會把輪數歸零。如果只是想繼續，直接 --record 就好，不要 --start。');
+      process.exit(2);
+    }
+    if (!why) usage('--force 需要 --why "<為什麼重開>"（沒有理由的重置，下一個人講不清楚發生過什麼）');
   }
-  s.stages[stage] = { task, started_at: new Date().toISOString(), rounds: [], invocation_failures: [] };
+
+  const carried = why_unfinished ? {
+    at: new Date().toISOString(),
+    task: prev.task,
+    rounds: prev.rounds?.length ?? 0,
+    open_ids: openBlockers(prev).map((b) => b.id),
+    why,
+    reason: why_unfinished,
+  } : undefined;
+
+  s.stages[stage] = {
+    task,
+    started_at: new Date().toISOString(),
+    rounds: [],
+    invocation_failures: [],
+    ...(carried ? { restarted_over: carried } : {}),
+  };
   save(s);
-  console.log(JSON.stringify({ stage, task, round: 0, next: 'R1 初審' }, null, 2));
+  console.log(JSON.stringify({
+    stage, task, round: 0, next: 'R1 初審',
+    ...(carried ? { restarted_over: carried } : {}),
+  }, null, 2));
 }
 
 // ── --record ───────────────────────────────────────────────────────────
@@ -359,7 +402,7 @@ const [mode, stage] = argv;
 if (!stage || stage.startsWith('--')) usage(`${mode ?? '(缺指令)'} 需要 <stage>（例如 S3 / S5）`);
 
 switch (mode) {
-  case '--start': start(stage, flag('--task')); break;
+  case '--start': start(stage, flag('--task'), argv.includes('--force'), flag('--why')); break;
   case '--record': {
     const bo = flag('--blockers');
     let override;
