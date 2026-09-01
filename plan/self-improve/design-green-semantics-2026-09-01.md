@@ -10,7 +10,7 @@
 **F1 收口判定是自我回報**：`review-state.mjs:154`（`openBlockers = filter(!resolved)`）＋`:329`（`green_allowed: Boolean(r) && open.length === 0`）。`--resolve` 是呼叫端自我宣告；最後一輪的 BLOCKER 全部宣告完，無需任何複審輪即 `green_allowed: true`。README:5-7 核心主張是「兩道閘門都不是同一顆模型自己說過了」，收口判定卻恰好建在一次自我回報上。
 
 **F10 真實操作者必須人工否決它**（transcript 逐字，`~/.claude/projects/-home-hnigel-game-01/380e9ed8-7ca6-43d3-9a12-d461316be570.jsonl`）：
-> 「`green_allowed: true` 只是『六條都已標記處理』，**不代表通過**——規格從 357 改到 569 行，動了很多新機制（sessionStorage 快照、60s fail-open），這些是 R1 沒審過的新東西。送 R2。」
+> 「`green_allowed: true` 只是『六條都已標記處理』，**不代表通過**——規格從 357 改到 569 行，動了很多新機制，這些是 R1 沒審過的新東西。送 R2。」
 
 失效模式具體：收口 BLOCKER 常引入新機制，而新機制沒被任何一輪審過。一個需要被人工否決的機械訊號比沒有訊號更糟——它在為錯誤方向背書。（這個失效模式後來在本任務的規格演化上連續三輪重演，見 §4。）
 
@@ -71,7 +71,7 @@
 - **run1**（target：v1→v3 規格）：R1 7B/3P → v2；R2 4B/2P → v3；R3 5B rc=20 STOP——五條全打 v3 新發明，無一回打原始問題。owner 裁示縮小 → v4。
 - **run2**（target：v4→v6 規格，新 run 起算、對 Codex 講明）：R1 7B/3P（含 B4 審查者自提 C10 設計）→ v5；R2 2B/1P（含審查者自行撤回 C10——先行承諾觸發）→ v6；owner P0 指令插入 VERDICT 設計；R3 5B rc=20 STOP——全打 VERDICT 層，但實地產出 `<<<VERDICT>>> BLOCK`（§3）。owner 裁示拆分。
 - 各輪逐條處置矩陣在 git 歷史中的 v5/v6 版規格（`git log -- plan/self-improve/design-2026-09-01.md`，若已 commit）；未 commit 則以監督者備份為準。
-- owner 裁示：game_01 移出驗收（run1-R1 後）；C8 採規劃委派否決整段委派（run1-R2 後）；縮小範圍（run1-R3 後）；C10 例外核准（run2-R1 後）→ 依先行承諾移除（run2-R2 後）；VERDICT P0 指令（run2-R3 前）；**拆分出貨（run2-R3 後，本檔由此而生）**。
+- owner 裁示：下游專案移出驗收（run1-R1 後）；C8 採規劃委派否決整段委派（run1-R2 後）；縮小範圍（run1-R3 後）；C10 例外核准（run2-R1 後）→ 依先行承諾移除（run2-R2 後）；VERDICT P0 指令（run2-R3 前）；**拆分出貨（run2-R3 後，本檔由此而生）**。
 
 ## 7. 日後重啟的建議起點（非規格，僅路標）
 
