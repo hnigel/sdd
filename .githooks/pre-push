@@ -19,6 +19,39 @@ echo "── pre-push 檢查 ─────────────────
 log="$(mktemp)"
 trap 'rm -f "$log"' EXIT
 
+# ── 版本號守衛 ────────────────────────────────────────────────────────
+# 改了 plugins/ 卻沒 bump 版本號 ⇒ 使用者跑 `claude plugin update` 會拿到
+# 「already at the latest version」—— 語氣是成功的，所以沒有人會去查，
+# 而 cache 停在舊 commit。2026-09-01 踩過兩次，第二次是在把規則寫進
+# HANDOFF §0 之後三個 commit 內自己違反的。散文守不住東西。
+printf '  版本號（動了 plugins/ 就必須 bump）… '
+base="$(git rev-parse --verify --quiet origin/main || true)"
+if [ -z "$base" ]; then
+  echo "跳過（沒有 origin/main 可比對）"
+else
+  changed_plugin="$(git diff --name-only "$base"..HEAD -- plugins/ | grep -v '/tests/' || true)"
+  version_now="$(node -p "require('./plugins/spec-pipeline/.claude-plugin/plugin.json').version")"
+  version_base="$(git show "$base":plugins/spec-pipeline/.claude-plugin/plugin.json 2>/dev/null \
+    | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo '')"
+  if [ -n "$changed_plugin" ] && [ "$version_now" = "$version_base" ]; then
+    echo "紅"
+    echo
+    echo "  plugins/ 有改動，但版本號還是 $version_now ——"
+    echo "  使用者的 \`claude plugin update\` 會回報「已是最新版」而實際上什麼都沒拉。"
+    echo
+    echo "  改動的檔案："
+    echo "$changed_plugin" | sed 's/^/    /'
+    echo
+    echo "  ⇒ 同時 bump 這兩處（validate-plugin 會檢查兩邊一致）："
+    echo "      plugins/spec-pipeline/.claude-plugin/plugin.json  version"
+    echo "      .claude-plugin/marketplace.json                   plugins[].version"
+    echo
+    echo "⇒ push 中止。"
+    exit 1
+  fi
+  echo "OK（$version_base → $version_now）"
+fi
+
 printf '  形狀檢查（manifest / frontmatter / 引用 / schema）… '
 if node scripts/validate-plugin.mjs > "$log" 2>&1; then
   echo "OK"
