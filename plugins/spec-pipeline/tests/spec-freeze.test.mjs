@@ -48,12 +48,24 @@ describe('⭐ 凍結的前提：S3 要先收口', () => {
     } finally { cleanup(); }
   });
 
-  it('沒有 review-state → 凍結照做，但要出聲說「這件事沒有被驗過」', () => {
+  // ⚠️ 舊版這兩條路徑都是「印一行警告然後照常凍結」——
+  // 於是完全沒過 S3 的規格可以被凍結成「唯一驗收依據」。
+  // 「沒有通過的證據」不是可以放行的例外。
+  it('沒有 review-state → rc=20，不得凍結', () => {
     const { dir, cleanup } = sandbox(null);
     try {
       const r = run(dir, '--freeze', SPEC);
-      assert.equal(r.status, 0);
-      assert.match(r.stderr, /沒有被驗過/);
+      assert.equal(r.status, 20, `拿到 rc=${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /不得凍結/);
+    } finally { cleanup(); }
+  });
+
+  it('S3 沒有任何一輪 → rc=20，不得凍結', () => {
+    const { dir, cleanup } = sandbox({ version: 1, stages: { S3: { task: 't', rounds: [], invocation_failures: [] } } });
+    try {
+      const r = run(dir, '--freeze', SPEC);
+      assert.equal(r.status, 20, `拿到 rc=${r.status}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /不得凍結/);
     } finally { cleanup(); }
   });
 });

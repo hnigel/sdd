@@ -33,6 +33,9 @@ function log(dir, name, body) {
 
 const BLOCK = (...lines) => `<<<FINDINGS>>>\n${lines.join('\n')}\n<<<END-FINDINGS>>>`;
 
+/** 讀狀態檔。用來斷言「腳本到底寫了什麼」，不只看 stdout。 */
+const state = (dir) => JSON.parse(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'));
+
 const TWO_BLOCKERS = BLOCK(
   'B1 BLOCKER a.mjs:12 基準寫死 HEAD，commit 後抓不到',
   'B2 BLOCKER a.mjs:40 deny 拼錯會靜默失效',
@@ -175,14 +178,69 @@ describe('⭐⭐ 契約不合就拒絕，絕不寬容', () => {
     } finally { cleanup(); }
   });
 
-  it('--blockers 逃生口仍然可用（明確宣告，可稽核）', () => {
+  it('--blockers 逃生口仍然可用，但必須帶 --why（明確宣告，可稽核）', () => {
     const { dir, cleanup } = sandbox();
     try {
       run(dir, '--start', 'S3', '--task', 't');
       const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
-        log(dir, 'l.log', '沒有格式的散文'), '--blockers', '3');
-      assert.equal(r.status, 0);
+        log(dir, 'l.log', '沒有格式的散文'), '--blockers', '3', '--why', '解析器壞了');
+      assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.equal(JSON.parse(r.stdout).blockers, 3);
+      const st = state(dir).stages.S3.rounds.at(-1);
+      assert.deepEqual(st.manual_override, { declared: 3, why: '解析器壞了' });
+    } finally { cleanup(); }
+  });
+
+  // ⚠️ 這一組是 2026-09-01 的真實事故：`Number('abc')` = NaN，
+  // 而 `Array.from({length: NaN})` = []，於是「rc=0 的任意 log ＋ 一個非數值」
+  // 就鑄出一個零 BLOCKER 的放行輪 —— 一個專防假綠的工具自己在鑄綠。
+  describe('--blockers 不得鑄出放行輪', () => {
+    for (const bad of ['abc', '0', '-1', '1.5', '1e3', '51', ' ', 'NaN']) {
+      it(`--blockers ${JSON.stringify(bad)} ⇒ rc=2，且狀態一個位元組都不動`, () => {
+        const { dir, cleanup } = sandbox();
+        try {
+          run(dir, '--start', 'S3', '--task', 't');
+          const before = readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8');
+          const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
+            log(dir, 'l.log', '散文'), '--blockers', bad, '--why', 'x');
+          assert.equal(r.status, 2, `拿到 rc=${r.status}: ${r.stdout}${r.stderr}`);
+          assert.equal(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'), before);
+        } finally { cleanup(); }
+      });
+    }
+
+    it('--blockers 沒帶 --why ⇒ rc=2（人工覆寫必須留下理由）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'l.log', '散文'), '--blockers', '2');
+        assert.equal(r.status, 2);
+        assert.match(r.stderr, /--why/);
+      } finally { cleanup(); }
+    });
+  });
+});
+
+// ⚠️ 舊版把 round 先 push 再判斷，且「零 BLOCKER ⇒ CLEAR」的分支排在上限檢查之前，
+// 所以 R3 停下來之後再送一次就成立 R4，上限檢查根本不會執行。
+describe('⭐⭐ 輪數上限不可繞過', () => {
+  it('達上限後再 --record ⇒ rc=20，且狀態逐位元組不變', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 't');
+      const l = log(dir, 'l.log', TWO_BLOCKERS);
+      run(dir, '--record', 'S3', '--rc', '0', '--log', l);           // R1
+      run(dir, '--record', 'S3', '--rc', '0', '--log', l);           // R2
+      run(dir, '--record', 'S3', '--rc', '0', '--log', l);           // R3 ⇒ 20
+      const before = readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8');
+
+      // 空哨兵區塊 —— 舊版會判 CLEAR 並放行
+      const clear = log(dir, 'c.log', BLOCK());
+      const r = run(dir, '--record', 'S3', '--rc', '0', '--log', clear);
+      assert.equal(r.status, 20, `拿到 rc=${r.status}: ${r.stdout}${r.stderr}`);
+      assert.equal(state(dir).stages.S3.rounds.length, 3);
+      assert.equal(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'), before);
     } finally { cleanup(); }
   });
 });

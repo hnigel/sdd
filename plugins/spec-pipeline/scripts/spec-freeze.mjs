@@ -87,13 +87,16 @@ function unifiedDiff(before, after, label) {
 /** S3 還有未收口的 BLOCKER 就不該凍結 —— 「S3 不 GREEN 不進 Step 4」。 */
 function assertS3Clear() {
   if (!fs.existsSync(REVIEW_STATE)) {
-    console.error('⚠️ 沒有 .claude/review-state.json —— 無法確認 S3 收口了沒。凍結照做，但這件事沒有被驗過。');
-    return;
+    // 「沒有狀態檔」不是可以放行的例外，是**沒有通過的證據**。
+    console.error('spec-freeze: 沒有 .claude/review-state.json ⇒ 無法確認 S3 收口了沒，不得凍結。');
+    console.error('「S3 不 GREEN 不進 Step 4」—— 先跑一輪 review 再來。');
+    process.exit(20);
   }
   const st = JSON.parse(fs.readFileSync(REVIEW_STATE, 'utf8')).stages?.S3;
   if (!st || !st.rounds.length) {
-    console.error('⚠️ review-state 裡 S3 還沒有任何有效的一輪 —— 凍結照做，但 S3 尚未真的通過。');
-    return;
+    console.error('spec-freeze: review-state 裡 S3 沒有任何有效的一輪 ⇒ S3 尚未通過，不得凍結。');
+    console.error('「S3 不 GREEN 不進 Step 4」—— 先跑一輪 review 再來。');
+    process.exit(20);
   }
   const open = (st.rounds[st.rounds.length - 1].blockers ?? []).filter((b) => !b.resolved);
   if (open.length) {

@@ -41,12 +41,13 @@ const STATE = path.join(ROOT, '.claude', 'review-state.json');
 
 const MAX_ROUNDS = 3;        // R3 仍有 BLOCKER ⇒ 停下來問 owner
 const MAX_INVOCATION_RETRY = 2;  // CLI 失敗另走最多兩次，不佔輪數
+const MAX_MANUAL_BLOCKERS = 50;  // --blockers 的上界。下界是 1：不得人工宣告「沒問題」
 
 function usage(msg) {
   console.error(`review-state: ${msg}`);
   console.error(`用法:
   review-state.mjs --start <stage> --task "<描述>"
-  review-state.mjs --record <stage> --rc <n> --log <file> [--blockers <n>]
+  review-state.mjs --record <stage> --rc <n> --log <file> [--blockers <n> --why "<理由>"]
   review-state.mjs --resolve <stage> --item <id> --how "<做法>"
   review-state.mjs --prompt-block <stage>
   review-state.mjs --status <stage>`);
@@ -174,6 +175,19 @@ function record(stage, rc, logFile, blockersOverride) {
   if (!logFile || !fs.existsSync(logFile)) usage(`--record 需要 --log <file>（找不到 ${logFile}）`);
   const s = load();
   const st = stageOf(s, stage);
+
+  // ⚠️ 入場守衛：輪數上限要在**讀 log 之前**擋，而且一個位元組都不寫。
+  // 舊版把 round 先 push 再判斷，且「零 BLOCKER ⇒ CLEAR」的分支排在上限檢查之前 ——
+  // 於是 R3 停下來之後再送一次就成立 R4，上限檢查根本不會執行。
+  if (st.rounds.length >= MAX_ROUNDS) {
+    console.log(JSON.stringify({
+      stage,
+      rounds_done: st.rounds.length,
+      verdict: 'STOP_ASK_OWNER',
+      note: `已達輪數上限 ${MAX_ROUNDS} ⇒ 停下來問 owner。這次沒有被記錄，狀態未變動。`,
+    }, null, 2));
+    process.exit(20);
+  }
   const raw = fs.readFileSync(logFile, 'utf8');
 
   const reviewError = (why, note) => {
@@ -202,9 +216,10 @@ function record(stage, rc, logFile, blockersOverride) {
   let parsed;
   if (blockersOverride !== undefined) {
     // 明確宣告的逃生口：呼叫端自己說有幾條。可見、可稽核，但不是預設路徑。
+    // 值域已在參數解析處驗過（1..MAX_MANUAL_BLOCKERS 的安全整數 ＋ 必帶 --why）。
     parsed = {
-      block: `(未使用哨兵區塊，由呼叫端宣告 ${blockersOverride} 條)`,
-      blockers: Array.from({ length: blockersOverride }, (_, i) => ({
+      block: `(未使用哨兵區塊，由呼叫端宣告 ${blockersOverride.n} 條；理由：${blockersOverride.why})`,
+      blockers: Array.from({ length: blockersOverride.n }, (_, i) => ({
         id: `B${i + 1}`, text: '(由呼叫端宣告，無內容)', resolved: null,
       })),
       polish: [],
@@ -232,6 +247,7 @@ function record(stage, rc, logFile, blockersOverride) {
     findings_block: parsed.block,
     blockers: parsed.blockers,
     polish: parsed.polish,
+    ...(blockersOverride ? { manual_override: { declared: blockersOverride.n, why: blockersOverride.why } } : {}),
   });
   save(s);
 
@@ -346,7 +362,20 @@ switch (mode) {
   case '--start': start(stage, flag('--task')); break;
   case '--record': {
     const bo = flag('--blockers');
-    record(stage, Number(flag('--rc')), flag('--log'), bo === undefined ? undefined : Number(bo));
+    let override;
+    if (bo !== undefined) {
+      // ⚠️ Number('abc') = NaN，而 Array.from({length: NaN}) = [] ——
+      // 舊版因此讓「rc=0 的任意 log ＋ 一個非數值」鑄出零 BLOCKER 的放行輪。
+      const n = Number(bo);
+      if (!Number.isSafeInteger(n) || n < 1 || n > MAX_MANUAL_BLOCKERS) {
+        usage(`--blockers 只收 1..${MAX_MANUAL_BLOCKERS} 的整數（拿到 ${JSON.stringify(bo)}）`
+          + ' —— 你可以人工宣告有幾條，但永遠不能人工宣告沒問題');
+      }
+      const why = flag('--why');
+      if (!why) usage('--blockers 需要 --why "<為什麼不走哨兵區塊>"（人工覆寫必須留下理由）');
+      override = { n, why };
+    }
+    record(stage, Number(flag('--rc')), flag('--log'), override);
     break;
   }
   case '--resolve': resolve(stage, flag('--item'), flag('--how')); break;
