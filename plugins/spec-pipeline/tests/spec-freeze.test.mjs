@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,6 +57,45 @@ describe('⭐ 凍結的前提：S3 要先收口', () => {
       const r = run(dir, '--freeze', SPEC);
       assert.equal(r.status, 20, `拿到 rc=${r.status}: ${r.stdout}${r.stderr}`);
       assert.match(r.stderr, /不得凍結/);
+    } finally { cleanup(); }
+  });
+
+  // ⚠️ 重新 freeze 曾經是 SPEC_DRIFT 的免費出口：改完規格不走 --revise，
+  // 直接再 --freeze 一次，就用「改動之前」那一輪清空輪祝福新內容、把 revisions 清空，
+  // --check 從此回 OK —— 那一輪根本沒看過新內容。
+  it('已凍結且內容改變 → --freeze rc=20，且 SPEC_DRIFT 沒有被洗白', () => {
+    const { dir, cleanup } = sandbox(clearS3);
+    try {
+      assert.equal(run(dir, '--freeze', SPEC).status, 0);
+      writeFileSync(join(dir, SPEC), '偷偷改過的內容');
+      assert.equal(JSON.parse(run(dir, '--check').stdout).verdict, 'SPEC_DRIFT');
+
+      const r = run(dir, '--freeze', SPEC);
+      assert.equal(r.status, 20, r.stdout + r.stderr);
+      assert.match(r.stderr, /--revise/);
+      // 關鍵：擋下來之後，drift 判定不能被洗掉
+      assert.equal(JSON.parse(run(dir, '--check').stdout).verdict, 'SPEC_DRIFT');
+    } finally { cleanup(); }
+  });
+
+  it('內容沒變時重新 --freeze 仍可用（不是無差別禁止）', () => {
+    const { dir, cleanup } = sandbox(clearS3);
+    try {
+      assert.equal(run(dir, '--freeze', SPEC).status, 0);
+      assert.equal(run(dir, '--freeze', SPEC).status, 0);
+    } finally { cleanup(); }
+  });
+
+  it('--force 沒帶 --why ⇒ rc=2；帶了才放行並留下 discarded_freeze', () => {
+    const { dir, cleanup } = sandbox(clearS3);
+    try {
+      run(dir, '--freeze', SPEC);
+      writeFileSync(join(dir, SPEC), '換一份全新的規格');
+      assert.equal(run(dir, '--freeze', SPEC, '--force').status, 2);
+      const r = run(dir, '--freeze', SPEC, '--force', '--why', '換主題');
+      assert.equal(r.status, 0, r.stdout + r.stderr);
+      const st = JSON.parse(readFileSync(join(dir, '.claude', 'spec-freeze.json'), 'utf8'));
+      assert.equal(st.discarded_freeze.why, '換主題');
     } finally { cleanup(); }
   });
 

@@ -44,7 +44,7 @@ const REVIEW_STATE = path.join(ROOT, '.claude', 'review-state.json');
 function usage(msg) {
   console.error(`spec-freeze: ${msg}`);
   console.error(`用法:
-  spec-freeze.mjs --freeze <spec.md>
+  spec-freeze.mjs --freeze <spec.md> [--force --why "<理由>"]
   spec-freeze.mjs --check
   spec-freeze.mjs --revise <spec.md> --why "<為什麼規格要改>"
   spec-freeze.mjs --delta`);
@@ -106,10 +106,37 @@ function assertS3Clear() {
   }
 }
 
-function freeze(spec) {
+function freeze(spec, force, why) {
   if (!spec || !fs.existsSync(spec)) usage(`--freeze 需要存在的規格檔（找不到 ${spec}）`);
-  assertS3Clear();
   const content = fs.readFileSync(spec, 'utf8');
+  const prev = load();
+
+  // ⚠️ 重新 freeze 是 SPEC_DRIFT 的免費出口。
+  // 舊版：改完規格不走 --revise，直接再 --freeze 一次，就用**凍結之前**那一輪
+  // 清空輪重新祝福新內容，順便把 revisions 清成空的 ⇒ --check 從此回 OK。
+  // 那一輪審的是舊內容，新內容沒有被任何人看過。
+  // ⇒ 用已經存好的 sha 做內容綁定：內容變了就不准重新凍結，去走 --revise。
+  if (prev && prev.sha !== sha(content)) {
+    if (!force) {
+      console.error('spec-freeze: 已經凍結過，而且規格內容已經改變 ⇒ 不得重新凍結。');
+      console.error(`  已凍結：${prev.spec} sha=${prev.sha}（${prev.frozen_at}）`);
+      console.error(`  現在的：${spec} sha=${sha(content)}`);
+      console.error('  ⚠️ 重新凍結會用「改動之前」那一輪的清空狀態去祝福改動之後的內容，');
+      console.error('     而那一輪根本沒看過新內容 —— 這正是 SPEC_DRIFT 要擋的事。');
+      console.error('  要改規格請走：--revise <規格檔> --why "<為什麼要改>"');
+      console.error('  真的是換一份全新的規格（不是修訂）才用：--freeze <檔> --force --why "<理由>"');
+      process.exit(20);
+    }
+    if (!why) usage('--force 需要 --why "<為什麼丟掉舊的凍結>"');
+  }
+
+  assertS3Clear();
+  const discarded = prev && prev.sha !== sha(content) ? {
+    at: new Date().toISOString(),
+    spec: prev.spec, sha: prev.sha, frozen_at: prev.frozen_at,
+    revisions: prev.revisions?.length ?? 0, why,
+  } : undefined;
+
   save({
     version: 1,
     spec: path.relative(ROOT, path.resolve(spec)),
@@ -117,6 +144,7 @@ function freeze(spec) {
     frozen_at: new Date().toISOString(),
     content,
     revisions: [],
+    ...(discarded ? { discarded_freeze: discarded } : {}),
   });
   console.log(JSON.stringify({ spec, sha: sha(content), note: '規格已凍結 —— 從這裡開始，它是唯一驗收依據' }, null, 2));
 }
@@ -190,7 +218,7 @@ ${r.delta.trim()}
 const argv = process.argv.slice(2);
 const flag = (n) => { const i = argv.indexOf(n); return i === -1 ? undefined : argv[i + 1]; };
 switch (argv[0]) {
-  case '--freeze': freeze(argv[1]); break;
+  case '--freeze': freeze(argv[1], argv.includes('--force'), flag('--why')); break;
   case '--check': check(); break;
   case '--revise': revise(argv[1]?.startsWith('--') ? undefined : argv[1], flag('--why')); break;
   case '--delta': showDelta(); break;
