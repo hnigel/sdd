@@ -5,7 +5,10 @@ description: 用 Codex（異廠商）審規格或審 code。把呼叫契約、RC
 
 # Codex Review — 異廠商審查的單一來源
 
-> 這些事實由 codex 自驗 + 人工獨立複跑確認（2026-08-31，codex v0.150.0-alpha.7）。
+> 事實重驗日：**2026-09-01，codex-cli 0.144.1**（`codex --version`）。
+>
+> ⚠️ **每條帶版本號或機器狀態的事實，都必須同段附 30 秒可跑的重驗指令。**
+> 理由見下方「三條曾經寫錯的事實」—— 這一段自己就過期過一次，而且沒有訊號。
 >
 > **不要用 `openai-codex` plugin 的 `/codex:review`** —— 那個走 shared built-in reviewer，
 > 不是這裡要的做法（owner 2026-08-31 指定）。
@@ -125,9 +128,12 @@ N=$(awk '/^codex$/{n=NR} END{print n}' "$tmp/out.log")
 sed -n "${N},\$p" "$tmp/out.log"
 ```
 
-⚠️ **這只是給人看的，不要拿它做判定。** 實測（v0.150）一份中途結束的 log 裡，
-`^codex$` 只出現一次而且在**推理開頭**，這行 awk 會把整份逐字稿（含 Codex 倒出來的
-原始碼）當成結論。判定一律交給 `review-state.mjs`，它只認哨兵區塊。
+⚠️ **這只是給人看的，不要拿它做判定。** `^codex$` 出現幾次、在哪裡，都不可靠：
+2026-09-01 一份正常結束的真實 review log（2999 行）裡它出現 **5 次**（行 84、1052、4590、9930、9937），
+每次都只是 CLI 在新一輪推理前印的分隔字樣；而另一份中途結束的 log 裡它只出現一次且在推理開頭 ——
+那會讓這行 awk 把整份逐字稿（含 Codex 用 `nl -ba` 倒進來的原始碼）當成結論。
+判定一律交給 `review-state.mjs`，它只認哨兵區塊。
+重驗：`grep -c '^codex$' <你手上任何一份 out.log>`
 
 ## Step 4: 輪數與收斂 —— 交給 `review-state.mjs`
 
@@ -177,15 +183,25 @@ rs --status S3                                    # green_allowed 在這裡看
 **這一段存在的理由**：這些原本以「本機實測」的口吻寫在筆記裡，看起來很可信，
 但其中三條在同一台機器的今天已經不成立。**帶版本號的實測筆記也會過期，而且沒有訊號。**
 
-### ① effort 不是 `none`，本機是 `xhigh`
+### ① effort 從 config 繼承，而 config 會漂移
 
 ```
-~/.codex/config.toml:  model = "gpt-5.6-sol"
-                       model_reasoning_effort = "xhigh"
-不帶 -c 實跑：          reasoning effort: xhigh
+2026-08-31 這份文件寫：  model = "gpt-5.6-sol" / model_reasoning_effort = "xhigh"
+2026-09-01 同一台實際是：model = "gpt-5.5"     / model_reasoning_effort = "medium"
 ```
-⇒ **傳 `-c model_reasoning_effort="high"` 是把強度往下調。**
-owner 已明示不用省 codex token ⇒ 釘 `xhigh`，而且**明寫**（跨機可重現），不要靠 config。
+重驗：`cat ~/.codex/config.toml`
+
+**同一台機器，一天之內就漂了。** 而且沒有任何訊號。
+
+⇒ 結論不變而且更強：**不要靠 config，一律在呼叫點明寫 `-m` 與 `-c`。**
+活證據：2026-08-31 那次真實 S3 審查的 log 首行是 `model: gpt-5.6-sol` /
+`reasoning effort: xhigh`、rc=0 —— config 當時已經漂了，是明寫救了那一輪。
+反向重驗（**不帶** `-c` 跑一次，看 stderr）：
+`echo '只回答兩個字：ok' | codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -`
+2026-09-01 實跑印出 `reasoning effort: medium` —— 當場繼承了漂移值。
+
+⚠️ **banner 走 stderr，stdout 只有答案。** 想在腳本裡驗 model/effort 就不能用
+`execFileSync`（只回 stdout），要用 `spawnSync` 取雙串流。
 
 ### ② `-C` 是**位置**問題，不是不支援
 
@@ -195,11 +211,17 @@ owner 已明示不用省 codex token ⇒ 釘 `xhigh`，而且**明寫**（跨機
 | `codex exec -C X review` | **0** |
 | `codex exec review -C X` | **2** |
 
-### ③ 「參數錯誤有上千行看起來正常的輸出」不符 v0.150
+### ③ 「參數錯誤有上千行看起來正常的輸出」在本機重現不出來
 
 三種 parser error 都是 `RC=2` 且**只有 5–11 行明確錯誤**。
 原觀察可能來自別的失敗模式或舊版本，**不要拿它當除錯依據**。
 （結論不變：**RC 一律寫檔再讀**。）
+
+⚠️ 這一條原本綁著一個**本機從未出現過的版本號**（2026-09-01 查證：所有 log 與
+`codex --version` 都是 `0.144.1`）。那個號碼想必是在另一台機器上讀到的，而筆記沒說是哪台。
+這就是為什麼現在每條事實都要附重驗指令，也是為什麼驗收會 grep 舊版本號 ——
+**寫死的版本號就是會過期的東西，留在文件裡只會讓人拿它當依據。**
+重驗：`codex --version`
 
 ### 仍然成立的
 

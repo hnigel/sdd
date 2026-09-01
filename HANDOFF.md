@@ -63,7 +63,7 @@ git config core.hooksPath .githooks
 1. **「deterministic」寫在 Markdown 裡就不是 deterministic** —— 所以 F0 是腳本
 2. **`--commit` 與 PROMPT 互斥** —— 想要自訂 review 格式就只能用 plain `exec`
 3. **`cmd > log; echo RC=$? > rc` 整段回傳 0** —— 漏讀 `.rc` 就是假綠
-4. **effort 從 per-machine config 繼承**，不是固定預設（傳 `high` 可能是往下調）
+4. **effort 從 per-machine config 繼承，而 config 會漂移**（2026-09-01 實證：同一台一天內從 `xhigh` 漂到 `medium`）⇒ 呼叫點必寫，不要推論「傳 X 是往上還往下」
 5. **「本機實測過」不等於「永遠成立」** —— 有三條帶版本號的實測筆記後來就不成立了
 6. **`--verify-scope` 的基準必須是入場 commit，不是 `HEAD`** —— 寫 `HEAD` 的話
    implementer 一 commit 就 diff 不出東西，回報 0 檔 0 行的**假綠**
