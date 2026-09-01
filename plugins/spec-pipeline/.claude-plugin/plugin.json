@@ -1,6 +1,8 @@
 {
   "name": "spec-pipeline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "F0 快路判定（機械式）+ /fable /opus 主流程 + codex-review 呼叫契約",
-  "author": { "name": "hnigel" }
+  "author": {
+    "name": "hnigel"
+  }
 }

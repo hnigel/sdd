@@ -28,12 +28,72 @@ echo '只回答兩個字：ok' | codex -C "$PWD" -s read-only -a never exec -m g
 
 ### 1. 安裝
 
+在 Claude Code 裡：
+
 ```
 /plugin marketplace add hnigel/sdd
 /plugin install spec-pipeline
 ```
 
-⚠️ 這是互動指令，**Claude 叫不動，要你自己打**。
+或用 CLI（在一般終端機，或在 Claude Code 裡用 `!` 前綴跑）：
+
+```bash
+claude plugin marketplace add hnigel/sdd
+claude plugin install spec-pipeline@sdd
+```
+
+⚠️ 斜線指令是互動的，**Claude 叫不動，要你自己打**；CLI 版沒有這個限制。
+
+### 1b. 更新（**每台機器都要跑一次**）
+
+```bash
+claude plugin update spec-pipeline@sdd
+```
+
+⚠️ **三個會咬人的地方：**
+
+**① `--scope` 預設是 `user`。** 如果你在某個專案底下另外裝過 project scope，
+上面那行**不會**更新它 —— 兩份會就此漂移，而且沒有訊號。先看清楚裝了幾份：
+
+```bash
+claude plugin list          # 同一個 plugin 可能出現多次，Scope 欄不同
+```
+
+project scope 要在**那個專案目錄底下**另外跑：
+
+```bash
+claude plugin update spec-pipeline@sdd --scope project
+```
+
+**② 要重開 session 才生效**（`update` 自己會講 `restart required to apply`）。
+已經載入的 SKILL 文本不會因為 cache 更新就改變。
+
+**③ 非互動環境**（管線、腳本、CI）要加 `-y`，否則會卡在確認提示。
+
+⚠️ **看到「already at the latest version」不代表你拿到最新的東西。**
+更新是**比版本號**，不是比 commit。維護者改了內容卻忘記 bump 版本號時，
+它會回報「已是最新版」——語氣是成功的，所以沒人會去查，而 cache 仍停在舊 commit。
+（2026-09-01 實測踩過。）判斷方法看下一節的 `plugin_pin`。
+
+### 1c. 確認真的更新到了
+
+```bash
+node ~/.claude/plugins/cache/sdd/spec-pipeline/*/scripts/doctor.mjs
+```
+
+看 `plugin_pin` 那一欄：它會列出**所有** scope 的 `gitCommitSha` 與 `installPath`。
+
+- 各 scope 的 sha 要一致，且等於你期望的 commit；
+- **兩台機器要各跑一次再比對** —— 「兩台是不是同一版」這個問題，單機跑不出答案。
+
+`verdict: READY` 代表沒有 FAIL；`WARN` 不影響（例如 codex config 漂移是預期的，
+契約本來就在呼叫點明寫 `-m`/`-c`，不繼承環境）。
+
+要連 codex 登入與模型可用性一起驗（會真的花一次呼叫）：
+
+```bash
+node ~/.claude/plugins/cache/sdd/spec-pipeline/*/scripts/doctor.mjs --probe-codex
+```
 
 ### 2. 在專案根目錄寫 `.claude/pipeline.json`
 

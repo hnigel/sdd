@@ -7,6 +7,29 @@
 
 ---
 
+## 0. 改完 `plugins/` 一定要 bump 版本號
+
+**否則使用者的 `claude plugin update` 會靜默無效。**
+
+2026-09-01 實測：推了四個 commit（含新檔 `doctor.mjs`）但沒動版本號，
+使用者跑 `claude plugin update spec-pipeline@sdd` 得到：
+
+```
+✔ spec-pipeline is already at the latest version (0.1.0).
+```
+
+cache 仍釘在舊 commit，`doctor.mjs` 根本沒被抓下來。
+**它回報的是成功的語氣，所以沒有人會去查。**
+
+⇒ 兩處要同時改（`validate-plugin.mjs` 會檢查兩邊一致，不一致會紅）：
+
+```
+plugins/spec-pipeline/.claude-plugin/plugin.json   version
+.claude-plugin/marketplace.json                    plugins[].version
+```
+
+⇒ 使用者端驗證：`claude plugin list` 看版本，或跑 doctor 看 `plugin_pin` 的 sha。
+
 ## 1. 這裡有什麼
 
 ```
