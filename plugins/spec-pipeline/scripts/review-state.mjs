@@ -35,6 +35,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { withLock, atomicWrite } from './lib/state-lock.mjs';
 
 const ROOT = process.cwd();
 const STATE = path.join(ROOT, '.claude', 'review-state.json');
@@ -58,10 +59,10 @@ const load = () => (fs.existsSync(STATE)
   ? JSON.parse(fs.readFileSync(STATE, 'utf8'))
   : { version: 1, stages: {} });
 
-function save(s) {
-  fs.mkdirSync(path.dirname(STATE), { recursive: true });
-  fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
-}
+function save(s) { atomicWrite(STATE, JSON.stringify(s, null, 2)); }
+
+/** 改狀態的指令一律包在鎖裡。拿不到鎖 ⇒ rc=2 fail-closed，不排隊、不搶。 */
+const mutating = (fn) => withLock(STATE, fn, (msg) => usage(msg));
 
 /**
  * ⚠️ **不要解析散文。**
@@ -454,7 +455,7 @@ const [mode, stage] = argv;
 if (!stage || stage.startsWith('--')) usage(`${mode ?? '(缺指令)'} 需要 <stage>（例如 S3 / S5）`);
 
 switch (mode) {
-  case '--start': start(stage, flag('--task'), argv.includes('--force'), flag('--why')); break;
+  case '--start': mutating(() => start(stage, flag('--task'), argv.includes('--force'), flag('--why'))); break;
   case '--record': {
     const bo = flag('--blockers');
     let override;
@@ -470,10 +471,10 @@ switch (mode) {
       if (!why) usage('--blockers 需要 --why "<為什麼不走哨兵區塊>"（人工覆寫必須留下理由）');
       override = { n, why };
     }
-    record(stage, Number(flag('--rc')), flag('--log'), override);
+    mutating(() => record(stage, Number(flag('--rc')), flag('--log'), override));
     break;
   }
-  case '--resolve': resolve(stage, flag('--item'), flag('--how')); break;
+  case '--resolve': mutating(() => resolve(stage, flag('--item'), flag('--how'))); break;
   case '--prompt-block': promptBlock(stage); break;
   case '--status': status(stage); break;
   default: usage(`不認得的指令: ${mode}`);

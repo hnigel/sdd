@@ -33,6 +33,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { withLock, atomicWrite } from './lib/state-lock.mjs';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
@@ -53,10 +54,10 @@ function usage(msg) {
 
 const sha = (t) => crypto.createHash('sha256').update(t).digest('hex').slice(0, 16);
 const load = () => (fs.existsSync(STATE) ? JSON.parse(fs.readFileSync(STATE, 'utf8')) : null);
-function save(s) {
-  fs.mkdirSync(path.dirname(STATE), { recursive: true });
-  fs.writeFileSync(STATE, JSON.stringify(s, null, 2));
-}
+function save(s) { atomicWrite(STATE, JSON.stringify(s, null, 2)); }
+
+/** 改狀態的指令一律包在鎖裡（同 review-state）。拿不到鎖 ⇒ rc=2 fail-closed。 */
+const mutating = (fn) => withLock(STATE, fn, (msg) => usage(msg));
 
 /** 用 git diff --no-index 產生 unified diff —— 不自己重造 diff 演算法。 */
 function unifiedDiff(before, after, label) {
@@ -218,9 +219,9 @@ ${r.delta.trim()}
 const argv = process.argv.slice(2);
 const flag = (n) => { const i = argv.indexOf(n); return i === -1 ? undefined : argv[i + 1]; };
 switch (argv[0]) {
-  case '--freeze': freeze(argv[1], argv.includes('--force'), flag('--why')); break;
+  case '--freeze': mutating(() => freeze(argv[1], argv.includes('--force'), flag('--why'))); break;
   case '--check': check(); break;
-  case '--revise': revise(argv[1]?.startsWith('--') ? undefined : argv[1], flag('--why')); break;
+  case '--revise': mutating(() => revise(argv[1]?.startsWith('--') ? undefined : argv[1], flag('--why'))); break;
   case '--delta': showDelta(); break;
   default: usage(`不認得的指令: ${argv[0] ?? '(缺)'}`);
 }

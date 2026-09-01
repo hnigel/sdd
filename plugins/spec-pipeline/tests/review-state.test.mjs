@@ -10,7 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -226,6 +226,86 @@ describe('⭐⭐ 契約不合就拒絕，絕不寬容', () => {
 // 所以 R3 停下來之後再送一次就成立 R4，上限檢查根本不會執行。
 // ⚠️ 輪數上限再機械，只要「重開一個 run」沒有代價，它就形同虛設 ——
 // 舊版 --start 只印一行 stderr 就把未收口的 run 蓋掉。
+// ⚠️ 狀態檔是「每個專案一份、按 stage 分」，而實際使用會在同一個專案並行跑多件事。
+// 舊版 save() 是裸的 writeFileSync：兩個並行的 --record 各寫一輪，
+// 最後寫入的無聲覆蓋另一邊。被覆蓋的那輪若帶 BLOCKER，留下的是清空輪 ⇒ 假綠。
+describe('⭐⭐ 並行時 fail-closed，不排隊也不搶', () => {
+  const LOCK = ['.claude', 'review-state.json.lock'];
+  const seed = (dir) => {
+    run(dir, '--start', 'S3', '--task', 't');
+    run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'l.log', TWO_BLOCKERS));
+  };
+
+  for (const args of [
+    ['--start', 'S3', '--task', 'B', '--force', '--why', 'x'],
+    ['--record', 'S3', '--rc', '0', '--log', 'l.log'],
+    ['--resolve', 'S3', '--item', 'B1', '--how', 'x'],
+  ]) {
+    it(`鎖存在時 ${args[0]} ⇒ rc=2 且狀態逐位元組不變`, () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        seed(dir);
+        writeFileSync(join(dir, ...LOCK), '{"pid":99999}');
+        const before = readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8');
+        const r = run(dir, ...args);
+        assert.equal(r.status, 2, `${args[0]} 拿到 rc=${r.status}`);
+        assert.match(r.stderr, /正被另一個行程使用/);
+        assert.equal(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'), before);
+      } finally { cleanup(); }
+    });
+  }
+
+  it('讀取指令不受鎖影響（--status 不改狀態，不該被擋）', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      writeFileSync(join(dir, ...LOCK), '{"pid":99999}');
+      assert.equal(run(dir, '--status', 'S3').status, 0);
+    } finally { cleanup(); }
+  });
+
+  it('正常結束不留殘留鎖，也不留 .tmp', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      const left = readdirSync(join(dir, '.claude')).filter((f) => /\.lock$|\.tmp/.test(f));
+      assert.deepEqual(left, []);
+    } finally { cleanup(); }
+  });
+
+  // ⚠️ 這條是 2026-09-01 實作鎖時當場踩到的 bug：
+  // `finally` 擋不住 `process.exit()`，而這些腳本到處用 exit 表達 rc ——
+  // 只靠 finally 會把鎖漏在磁碟上，下一個指令就被自己卡住。
+  it('走 exit 路徑（rc≠0）也要釋放鎖，不能把自己鎖死', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 't');
+      const l = log(dir, 'l.log', TWO_BLOCKERS);
+      run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+      run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+      // R3 觸發 exit(20)
+      assert.equal(run(dir, '--record', 'S3', '--rc', '0', '--log', l).status, 20);
+      assert.deepEqual(readdirSync(join(dir, '.claude')).filter((f) => /\.lock$/.test(f)), [],
+        'exit(20) 之後不得留下鎖');
+      // usage() 的 exit(2) 路徑同理
+      assert.equal(run(dir, '--resolve', 'S3', '--item', 'B99', '--how', 'x').status, 2);
+      assert.deepEqual(readdirSync(join(dir, '.claude')).filter((f) => /\.lock$/.test(f)), [],
+        'exit(2) 之後不得留下鎖');
+    } finally { cleanup(); }
+  });
+
+  it('鎖釋放後回復正常', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      seed(dir);
+      writeFileSync(join(dir, ...LOCK), '{"pid":99999}');
+      assert.equal(run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x').status, 2);
+      rmSync(join(dir, ...LOCK));
+      assert.equal(run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x').status, 0);
+    } finally { cleanup(); }
+  });
+});
+
 describe('⭐⭐ 重開 run 要留痕', () => {
   const seed = (dir) => {
     run(dir, '--start', 'S3', '--task', 'A');
