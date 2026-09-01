@@ -33,7 +33,9 @@ description: 用 Codex（異廠商）審規格或審 code。把呼叫契約、RC
 ## 共同前綴（把環境釘死，不要靠 config 碰運氣）
 
 ```bash
-CX=(codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -c 'model_reasoning_effort="xhigh"')
+# effort 依 target 大小決定，不要無條件 xhigh（見下表）
+eff=xhigh   # 或 medium / low
+CX=(codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -c "model_reasoning_effort=\"$eff\"")
 ```
 
 | 旗標 | 為什麼 |
@@ -54,6 +56,51 @@ prompt 必須自己寫死這些（因為不能用 `--commit`）：
 - review target：commit SHA / 檔案清單 / 工作樹範圍
 - **上一輪的 findings 與「我怎麼處理的」**（要它逐項確認是否收口，否則它會重新發散）
 - 輸出格式（見下方兩個實測有效模式）
+
+### ⚠️ effort 要跟著 target 大小走 —— 別用 xhigh 審幾行字
+
+**這是實際咬到人的問題**：2026-09-01 一次幾行文字的 review 跑了超過 10 分鐘；
+同日一份 88 行規格的 R1 實測 **13.3 分鐘**。成因是契約原本把 `xhigh` 無條件釘死。
+
+依 target 行數選（**機械規則，不是判斷**，用 `wc -l` 或 `git diff --stat` 就決定得了）：
+
+| target 大小 | effort | 理由 |
+|---|---|---|
+| **< 50 行** | `low` | 幾行字不需要最高推理預算。官方文件：`low`/`medium` **只報最有信心的 findings** |
+| **50–300 行** | `medium` | |
+| **> 300 行，或已知是 hard 任務的 R1** | `xhigh` | 要廣度時才用 |
+| **R2 起（任何大小）** | 降一級，且至少不高於 `medium` | 見下一節 |
+
+⚠️ **釘死 `-m` 與 `-c` 這件事不變** —— 變的是 `-c` 帶什麼值，不是改回繼承 config
+（config 會漂移，見「三條曾經寫錯的事實」①）。
+
+### ⚠️ prompt 要圈出 target，否則它會重審整個 repo
+
+即使 target 只有幾行，只要 prompt 說「對抗性地審」「請開檔核對」，
+它就會去探索整個 repo —— 2026-09-01 實測：一輪開 7–17 個相異檔案，
+log 有 **90.6%** 是 `nl -ba` 倒進來的檔案內容（那是 stdout 注入，不是它在生成，
+但它仍然要讀完）。
+
+⇒ target 小的時候，prompt 要明寫圍籬：
+
+```
+Review target 僅限：<檔案:行號範圍 或 diff>
+不要重新審查整個 repo。只有在需要查證上面那段引用的事實時才開其他檔案，
+並在 finding 裡註明你查了什麼。
+```
+
+**不要**因此拿掉「必須查證」的要求 —— 那是這個審查唯一值錢的地方。
+圈的是**範圍**，不是**深度**。
+
+### ⚠️ 幾行字本來就不該進 S3
+
+S3/S5 是給**走完整流程的任務**用的。幾行文字的改動應該在 **F0 就被判 FAST**
+而根本不進審查（`fast-eligibility.mjs --check <路徑>` 回 `rc=0`）。
+
+走到 S3 通常代表兩件事之一：
+- **F0 沒跑**（歷史上真的發生過：唯一一次真實執行從未呼叫過 `fast-eligibility.mjs`）
+- 或該路徑不在專案的 `fast_path.allow_globs` 裡 ⇒ **fail-closed 判 FULL，那是正確行為**，
+  但代價是完整審查。若那類路徑其實不需要審，**去改 `allow_globs`**，不要改審查強度。
 
 ### ⚠️ 第二輪起要降級 —— 不降級就會審到第七輪還在講風格
 
