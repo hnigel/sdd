@@ -83,10 +83,14 @@ const BEGIN = '<<<FINDINGS>>>';
 const END = '<<<END-FINDINGS>>>';
 
 export const FORMAT_SPEC = `${BEGIN}
-B1 BLOCKER 一行描述（檔案:行號 + 為什麼會出事）
-B2 BLOCKER 一行描述
-P1 POLISH 一行描述
-${END}`;
+B1 BLOCKER 檔案:行號 [FAIL] 什麼輸入或狀態 -> 什麼錯誤結果
+B2 BLOCKER 檔案:行號 [FAIL] 什麼輸入或狀態 -> 什麼錯誤結果
+P1 POLISH 一行標題，不要展開
+${END}
+
+⚠️ 每條 BLOCKER 都必須帶 \`[FAIL] <輸入或狀態> -> <錯誤結果>\`。
+講不出具體觸發情境的，請自己降級成 POLISH —— 那不是懲罰，是分級。
+（腳本只檢查這個欄位**存在**，不判斷內容好壞。）`;
 
 /**
  * 取**最後一個**哨兵區塊。
@@ -102,6 +106,8 @@ function findingsBlock(text) {
 }
 
 const ITEM = /^(B|P)(\d+)\s+(BLOCKER|POLISH)\s+(.+)$/;
+/** BLOCKER 的失效情境欄位。只驗形狀：有 [FAIL]，且其後有一個 -> 分隔。 */
+const FAIL_FIELD = /\[FAIL\][^\n]*->/;
 
 /**
  * 解析區塊內容。**任何不合契約的地方都回 error，不做寬容處理。**
@@ -121,6 +127,14 @@ function parseFindings(text) {
     const [, kind, num, level, desc] = m;
     if ((kind === 'B') !== (level === 'BLOCKER')) {
       return { error: `編號與等級對不上：${JSON.stringify(line.slice(0, 80))}（B* 必須是 BLOCKER，P* 必須是 POLISH）` };
+    }
+    // ⚠️ Verification bar：BLOCKER 必須講得出具體失效情境。
+    // 講不出「什麼輸入 → 什麼錯誤結果」的，多半是偏好或推測，不是會出事的缺陷。
+    // 這裡**只驗欄位存在**，不判斷內容好壞 —— 判斷品質就回到散文了。
+    // （不做寬容降級：審查者自己說過，靜默把 BLOCKER 改寫成 POLISH 會讓真缺陷消失。）
+    if (kind === 'B' && !FAIL_FIELD.test(desc)) {
+      return { error: `${kind}${num} 缺 [FAIL] 欄位：${JSON.stringify(line.slice(0, 80))}\n`
+        + '  BLOCKER 必須寫成 `[FAIL] <什麼輸入或狀態> -> <什麼錯誤結果>`；講不出來的請降級為 POLISH' };
     }
     (kind === 'B' ? blockers : polish).push({ n: Number(num), desc });
   }
@@ -153,6 +167,32 @@ const stageOf = (s, name) => {
 };
 const lastRound = (st) => st.rounds[st.rounds.length - 1] ?? null;
 const openBlockers = (st) => (lastRound(st)?.blockers ?? []).filter((b) => !b.resolved);
+
+/** 從 finding 文字裡抽出 `檔案:行號` 這種引用。純字串處理，不判斷語意。 */
+const citations = (text) => new Set((text.match(/[\w./@-]+:\d+(?:-\d+)?/g) ?? []));
+
+/**
+ * 每輪的「新引用」數 —— 這一輪的 findings 指向的位置，有幾個是先前各輪都沒指過的。
+ *
+ * ⚠️ 這**不是**收斂判定，是給人看的軌跡。它回答的是
+ * 「審查者還在開新戰場，還是在原地繞」——那是編輯要的資訊，不是閘門。
+ * 一輪的 findings 全部指向前面沒出現過的位置，通常代表上一輪的修訂長出了新表面。
+ */
+function trajectory(st) {
+  const seen = new Set();
+  return st.rounds.map((r) => {
+    const cited = citations([...(r.blockers ?? []).map((b) => b.text), ...(r.polish ?? [])].join('\n'));
+    const fresh = [...cited].filter((c) => !seen.has(c));
+    for (const c of cited) seen.add(c);
+    return {
+      round: `R${r.n}`,
+      blockers: (r.blockers ?? []).length,
+      polish: (r.polish ?? []).length,
+      new_citations: fresh.length,
+      ...(r.manual_override ? { manual_override: true } : {}),
+    };
+  });
+}
 
 // ── --start ────────────────────────────────────────────────────────────
 /**
@@ -304,8 +344,19 @@ function record(stage, rc, logFile, blockersOverride) {
     return;
   }
   if (n >= MAX_ROUNDS) {
+    // ⚠️ 這裡要問的是**編輯的問題**，不是計數器的問題。
+    // 「還要不要再審一輪」預設了「再審會更好」；但審查者對看過的東西是收斂的，
+    // 撐住 findings 數的是每輪修訂新增的材料 —— 再審一輪只會審到更年輕的東西。
+    // owner 在這個流程裡就是編輯：該由他裁決「剩下這幾條夠不夠格擋關」。
     out.verdict = 'STOP_ASK_OWNER';
-    out.note = `R${n} 仍有 ${open} 條 BLOCKER（上限 ${MAX_ROUNDS} 輪）⇒ 停下來問 owner，不要再開下一輪`;
+    out.trajectory = trajectory(st);
+    out.note = `R${n} 仍有 ${open} 條 BLOCKER（上限 ${MAX_ROUNDS} 輪）⇒ 交給 owner 裁決。`;
+    out.ask_owner = [
+      `逐條看這 ${open} 條：哪幾條**夠格擋住出貨**？（要能講出「什麼輸入 → 什麼錯誤結果」的才算）`,
+      '不夠格的，記為已知缺口並附繞過路徑 —— 誠實記載比留一道擋不住的閘好。',
+      '看 trajectory 的 new_citations：若每輪都在指新位置，發散的是**修訂**不是審查 ⇒ 該拆該減，不是再審。',
+      '不要預設「再審一輪會更好」。',
+    ];
     console.log(JSON.stringify(out, null, 2));
     process.exit(20);
   }
@@ -385,6 +436,7 @@ function status(stage) {
     next_round: st.rounds.length >= MAX_ROUNDS ? '(已達上限)' : `R${st.rounds.length + 1}`,
     invocation_retry: `${st.invocation_failures.length}/${MAX_INVOCATION_RETRY}`,
     open_blockers: open.map((b) => b.id),
+    trajectory: trajectory(st),
     green_allowed: Boolean(r) && open.length === 0,
     note: !r ? '還沒有有效的一輪 ⇒ 不得 GREEN'
       : open.length ? `還有 ${open.length} 條未收口 ⇒ 不得 GREEN`

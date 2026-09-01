@@ -42,7 +42,7 @@ CX=(codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -c 'model_reasonin
 | `-s read-only` | **review 不得改檔**。沒有這個，plain `exec` 是可以動工作樹的 |
 | `-a never` | 不要求核准，背景跑得動 |
 | `-m gpt-5.6-sol` | 不釘住就吃 per-machine config，換機會選錯模型 |
-| `-c 'model_reasoning_effort="xhigh"'` | 同理。**見下方「反轉的結論」** |
+| `-c 'model_reasoning_effort="xhigh"'` | 同理。**R1 用 xhigh，R2 起改 `medium`** —— 見下方「第二輪起要降級」 |
 
 ---
 
@@ -54,6 +54,44 @@ prompt 必須自己寫死這些（因為不能用 `--commit`）：
 - review target：commit SHA / 檔案清單 / 工作樹範圍
 - **上一輪的 findings 與「我怎麼處理的」**（要它逐項確認是否收口，否則它會重新發散）
 - 輸出格式（見下方兩個實測有效模式）
+
+### ⚠️ 第二輪起要降級 —— 不降級就會審到第七輪還在講風格
+
+**這不是我們發明的，是業界處理同一個病的既有做法**（Claude Code 官方 code review 的
+`REVIEW.md` 有一個叫 **re-review convergence** 的設定，原文說一條
+「after the first review, suppress new nits and post Important findings only」的規則可以
+"stop a one-line fix from **reaching round seven** on style alone"）。
+
+| 輪次 | effort | prompt 要寫死的規則 |
+|---|---|---|
+| **R1** | `xhigh` | 完整審查 |
+| **R2 起** | `medium` | 「**只報 BLOCKER 級別。不要提出新的 POLISH。**」 |
+
+為什麼降 effort：官方文件明說 `low`/`medium` 只報**最有信心**的 findings，
+而 `high` 以上 "**may include findings the review is less sure about**"。
+第一輪要廣，之後要準 —— 每輪都開 xhigh 等於主動選最會找碴的檔位，再對它的產出零容忍。
+
+**POLISH 上限**：prompt 要求「最多列 5 條 POLISH，其餘只給一個數量」。
+理由同樣是官方文件那句：「**Prose and config files can be polished forever**」——
+規格就是散文，可以被無限打磨。
+
+⚠️ **這兩條規則是 prompt 的責任，腳本不強制。** 腳本強制的只有
+`review-state.mjs` 的哨兵格式與 `[FAIL]` 欄位（那是**形式**檢查，不是品質判斷）。
+
+### BLOCKER 必須講得出失效情境
+
+`FORMAT_SPEC`（`review-state.mjs` 單一來源，`--prompt-block` 會自動帶下去）要求每條 BLOCKER 寫成：
+
+```
+B1 BLOCKER 檔案:行號 [FAIL] 什麼輸入或狀態 -> 什麼錯誤結果
+```
+
+缺 `[FAIL] … -> …` ⇒ `rc=2`，**不做寬容降級**（靜默把 BLOCKER 改寫成 POLISH 會讓真缺陷消失，
+這是審查者自己表達的偏好）。講不出具體觸發情境的請自己降級成 POLISH ——
+那不是懲罰，是分級。
+
+這條同樣有外部前案：Claude Code 的 **Verification bar**
+（"behavior claims need a `file:line` citation in the source, not an inference from naming"）。
 
 ### 兩個實測有效的 prompt 模式
 

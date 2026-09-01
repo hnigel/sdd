@@ -37,8 +37,8 @@ const BLOCK = (...lines) => `<<<FINDINGS>>>\n${lines.join('\n')}\n<<<END-FINDING
 const state = (dir) => JSON.parse(readFileSync(join(dir, '.claude', 'review-state.json'), 'utf8'));
 
 const TWO_BLOCKERS = BLOCK(
-  'B1 BLOCKER a.mjs:12 基準寫死 HEAD，commit 後抓不到',
-  'B2 BLOCKER a.mjs:40 deny 拼錯會靜默失效',
+  'B1 BLOCKER a.mjs:12 [FAIL] commit 之後跑 --check -> 基準寫死 HEAD，抓不到差異',
+  'B2 BLOCKER a.mjs:40 [FAIL] deny_globs 拼成 denyGlobs -> 整條 deny 靜默失效，敏感路徑拿到 FAST',
   'P1 POLISH 命名',
 );
 
@@ -122,7 +122,7 @@ describe('⭐⭐⭐ 迴歸：舊版散文解析製造的三種假綠', () => {
   it('⭐ 被倒出來的檔案裡剛好有哨兵格式 —— 取最後一個（真正的回答一定在最後）', () => {
     const { dir, cleanup } = sandbox();
     try {
-      const decoy = BLOCK('B1 BLOCKER 這是被倒出來的說明文件裡的範例');
+      const decoy = BLOCK('B1 BLOCKER 這是被倒出來的說明文件裡的範例 [FAIL] x -> y');
       const body = `一些工具輸出\n${decoy}\n更多輸出\n${TWO_BLOCKERS}`;
       run(dir, '--start', 'S3', '--task', 't');
       const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'g.log', body));
@@ -137,7 +137,7 @@ describe('⭐⭐ 契約不合就拒絕，絕不寬容', () => {
     const { dir, cleanup } = sandbox();
     try {
       run(dir, '--start', 'S3', '--task', 't');
-      const bad = BLOCK('B1 BLOCKER 好的', '這行沒有編號');
+      const bad = BLOCK('B1 BLOCKER a:1 [FAIL] x -> y', '這行沒有編號');
       const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'h.log', bad));
       assert.equal(r.status, 2);
       assert.match(r.stderr, /不合格式的行/);
@@ -148,7 +148,7 @@ describe('⭐⭐ 契約不合就拒絕，絕不寬容', () => {
     const { dir, cleanup } = sandbox();
     try {
       run(dir, '--start', 'S3', '--task', 't');
-      const gap = BLOCK('B1 BLOCKER x', 'B2 BLOCKER x', 'B5 BLOCKER x');
+      const gap = BLOCK('B1 BLOCKER a:1 [FAIL] x -> y', 'B2 BLOCKER a:2 [FAIL] x -> y', 'B5 BLOCKER a:5 [FAIL] x -> y');
       const r = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'i.log', gap));
       assert.equal(r.status, 2);
       assert.match(r.stderr, /連續/);
@@ -333,8 +333,77 @@ describe('⭐⭐ 停止條件是機械的', () => {
       assert.equal(run(dir, '--record', 'S3', '--rc', '0', '--log', l).status, 0);
       const r3 = run(dir, '--record', 'S3', '--rc', '0', '--log', l);
       assert.equal(r3.status, 20);
-      assert.match(JSON.parse(r3.stdout).note, /停下來問 owner/);
+      const out = JSON.parse(r3.stdout);
+      assert.match(out.note, /交給 owner 裁決/);
+      // ⚠️ 這個停點問的必須是**編輯的問題**（哪幾條夠格擋關），
+      // 不是計數器的問題（還要不要再審一輪）——後者預設了「再審會更好」。
+      assert.ok(Array.isArray(out.ask_owner) && out.ask_owner.length >= 3);
+      assert.ok(out.ask_owner.some((q) => /擋住出貨|擋關/.test(q)), '要問「哪幾條夠格擋關」');
+      assert.ok(out.ask_owner.some((q) => /不要預設/.test(q)), '要明講不預設再審一輪會更好');
+      assert.ok(Array.isArray(out.trajectory) && out.trajectory.length === 3, '要附軌跡供裁決');
     } finally { cleanup(); }
+  });
+
+  it('軌跡：new_citations 算出「這一輪指了幾個先前沒指過的位置」', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 't');
+      run(dir, '--record', 'S3', '--rc', '0', '--log',
+        log(dir, 'a.log', BLOCK('B1 BLOCKER a.mjs:10 [FAIL] x -> y')));
+      run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+      // 同一個位置 ⇒ 0 個新引用（原地繞）
+      run(dir, '--record', 'S3', '--rc', '0', '--log',
+        log(dir, 'b.log', BLOCK('B1 BLOCKER a.mjs:10 [FAIL] p -> q')));
+      run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'y');
+      // 全新位置 ⇒ 1 個新引用（上一輪的修訂長出了新表面）
+      run(dir, '--record', 'S3', '--rc', '0', '--log',
+        log(dir, 'c.log', BLOCK('B1 BLOCKER z.mjs:99 [FAIL] m -> n')));
+      const tj = JSON.parse(run(dir, '--status', 'S3').stdout).trajectory;
+      assert.deepEqual(tj.map((x) => x.new_citations), [1, 0, 1]);
+    } finally { cleanup(); }
+  });
+
+  describe('⭐⭐ BLOCKER 必須講得出失效情境', () => {
+    it('B 行缺 [FAIL] ⇒ rc=2，不做寬容降級', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'n.log', BLOCK('B1 BLOCKER a.mjs:12 這裡好像怪怪的')));
+        assert.equal(r.status, 2, r.stdout + r.stderr);
+        assert.match(r.stderr, /\[FAIL\]/);
+      } finally { cleanup(); }
+    });
+
+    it('[FAIL] 但缺 -> 也不算（欄位要有形狀，不是有字就好）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'o.log', BLOCK('B1 BLOCKER a.mjs:12 [FAIL] 就是會壞')));
+        assert.equal(r.status, 2);
+      } finally { cleanup(); }
+    });
+
+    it('POLISH 不需要 [FAIL]（分級的意義就在這）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const r = run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'p.log', BLOCK('P1 POLISH 命名可以更好')));
+        assert.equal(r.status, 0, r.stdout + r.stderr);
+        assert.equal(JSON.parse(r.stdout).verdict, 'CLEAR');
+      } finally { cleanup(); }
+    });
+
+    it('格式要求會被帶進下一輪的 prompt（單一來源，不會漂移）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'q.log', TWO_BLOCKERS));
+        assert.match(run(dir, '--prompt-block', 'S3').stdout, /\[FAIL\]/);
+      } finally { cleanup(); }
+    });
   });
 
   it('沒有有效的一輪 → green_allowed = false', () => {
