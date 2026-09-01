@@ -7,6 +7,21 @@
 
 ---
 
+## 00. 開工前先讀 `plan/self-improve/LEDGER.md`
+
+**查過的問題不要再查一次。** 那份文件收著：
+
+- 已查證的機器事實（codex 版本、config 漂移、banner 走 stderr、zsh 分詞、
+  plugin 更新比版本號不比 commit…）**每條附重驗指令**
+- **死路清單**：八個試過且失敗的設計，附死因。勿復活原形
+- 為什麼 review 會「審不完」的診斷，以及可操作的判準
+- 外部前案（別人怎麼解，附 URL）
+- 量測過的東西（Codex log 有 90% 是檔案傾印、跨輪重複讀取…）別再重算
+
+⚠️ 查完新東西**回來寫進那份**，不要只留在 commit message —— 沒有人會回頭翻 commit。
+
+---
+
 ## 0. 改完 `plugins/` 一定要 bump 版本號
 
 **否則使用者的 `claude plugin update` 會靜默無效。**
