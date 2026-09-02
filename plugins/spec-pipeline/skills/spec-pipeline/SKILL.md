@@ -226,6 +226,16 @@ sf --delta            # 把這段貼進 S3 複審的 prompt
 | R3 仍有 BLOCKER ⇒ 停下來問 owner | `--record` 第三輪還有未收口 ⇒ `rc=20` |
 | 拿不到 `<<<FINDINGS>>>` 哨兵區塊 | `rc=21`，**不會因為抓不到就當作零** |
 | 區塊格式不合（跳號／等級對不上） | `rc=2`，不做寬容處理 |
+| R2 起的複審規則（只報 BLOCKER、不提新 POLISH） | `--prompt-block` **自動帶進素材**，不靠你記得 |
+| 「發散的是修訂不是審查」 | `--record` 在 R2 起可能回 `divergence_hint`（**提示，不是閘門**） |
+
+⚠️ **看到 `divergence_hint` 就停下來拆或減，不要再送一輪。**
+它的意思是這一輪打的全是你上一輪為了收口而新加的東西 —— 再審只會審到更年輕的東西。
+優先序：刪掉那個機制 > 縮小 review target > 誠實記為已知缺口 > 才是加新機制。
+完整觸發條件見 `codex-review` skill。
+
+⚠️ **effort 的降級提示走 stderr。** `--prompt-block` 的 stdout 是要整段貼進 prompt 的素材，
+stderr 才是給你的操作指示（把 `-c model_reasoning_effort` 降到不高於 `medium`）。
 
 ⚠️ **prompt 結尾一定要附哨兵格式要求**，見 `codex-review` skill。
 沒附的話每一輪都會 `rc=21` —— 那是刻意的，因為「解析不出來」與「沒有問題」

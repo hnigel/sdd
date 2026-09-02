@@ -22,7 +22,8 @@
  *   --start <stage> --task "<描述>"              開一個新 run（會覆蓋該 stage 的舊狀態）
  *   --record <stage> --rc <n> --log <file>       記一輪。RC≠0 或回覆空 ⇒ 不算一輪
  *   --resolve <stage> --item <id> --how "<做法>"  記下某條 finding 怎麼處理的
- *   --prompt-block <stage>                       產生下一輪 prompt 要貼的「上輪 findings + 我的處理」
+ *   --prompt-block <stage>                       產生下一輪 prompt 要貼的「複審規則 + 上輪 findings + 我的處理」
+ *                                                （stdout = 貼進 prompt 的素材；stderr = 給操作者的 effort 指示）
  *   --status <stage>                             現在第幾輪、還有幾條沒收口、可不可以 GREEN
  *
  * ## 退出碼
@@ -189,10 +190,44 @@ function trajectory(st) {
       round: `R${r.n}`,
       blockers: (r.blockers ?? []).length,
       polish: (r.polish ?? []).length,
+      cited: cited.size,
       new_citations: fresh.length,
       ...(r.manual_override ? { manual_override: true } : {}),
     };
   });
+}
+
+/**
+ * 「發散的是修訂，不是審查」的機械訊號 —— **提示，不是閘門**。
+ *
+ * LEDGER §2 的可操作判準：*一次修訂讓規格變長、而 findings 沒下降 ⇒ 該拆該減，
+ * 不是該再審一輪*。腳本量不到「變長」（target 不在它手上），但量得到同一件事的
+ * 另一面：**這一輪指的位置全部是先前沒指過的**。
+ *
+ * run1 實測正是這個形狀：R2 打新機制 4/4、R3 打新機制 5/5，findings 穩在 4–5 條，
+ * 行數每輪 +38 —— 兩個速率都沒下降，那不是收斂，是穩態。
+ *
+ * ⚠️ 只在 R2 起算（R1 沒有前輪可比，它的引用當然全新）。
+ * ⚠️ 不改 verdict、不改 exit code、不進狀態檔。理由見 LEDGER §4：閘門一律留在腳本，
+ *    而這一條的判準裡有「該拆該減」——那是編輯的價值判斷，腳本不做。
+ */
+function divergence(st) {
+  const tj = trajectory(st);
+  if (tj.length < 2) return null;
+  const cur = tj[tj.length - 1];
+  const prev = tj[tj.length - 2];
+  const curTotal = cur.blockers + cur.polish;
+  const prevTotal = prev.blockers + prev.polish;
+  // 三個條件同時成立才提示：有引用、引用全新、findings 沒下降
+  if (!cur.cited || cur.new_citations !== cur.cited || curTotal < prevTotal) return null;
+  return {
+    signal: `${cur.round} 的 ${cur.cited} 個引用位置**全部**是先前各輪沒指過的，`
+      + `而 findings 沒有下降（${prev.round} ${prevTotal} → ${cur.round} ${curTotal}）`,
+    means: '這一輪打的是上一輪為了收口而新加的東西 ⇒ 發散的是**修訂**，不是審查。',
+    do: '該拆該減，不是再審一輪。優先考慮刪掉那個機制、縮小 review target、'
+      + '或誠實記為已知缺口 —— 再加一層只會多一片沒審過的表面。',
+    note: '這是提示，不是閘門。verdict 與 exit code 都沒有因為它改變。',
+  };
 }
 
 // ── --start ────────────────────────────────────────────────────────────
@@ -364,6 +399,13 @@ function record(stage, rc, logFile, blockersOverride) {
   out.verdict = 'NEEDS_FIX';
   out.note = `修完用 --resolve 逐條記下做法，再用 --prompt-block 產生 R${n + 1} 的 prompt`;
   out.items = parsed.blockers.map((b) => b.id);
+  // ⚠️ 這個訊號在 R2 就成立了，不必等 R3 的停點才知道。等到停點才印，
+  //    等於讓那一輪修訂白做 —— 它會照著同一個形狀再長出一片新表面。
+  const div = divergence(st);
+  if (div) {
+    out.divergence_hint = div;
+    out.trajectory = trajectory(st);
+  }
   console.log(JSON.stringify(out, null, 2));
 }
 
@@ -391,10 +433,23 @@ function promptBlock(stage) {
     console.error(`review-state: ${stage} 還沒有任何一輪 ⇒ 這次就是 R1 初審`);
     process.exit(10);
   }
+  // ⚠️ 走到這裡代表至少已經有一輪 ⇒ 下一輪必然是 R2 或更後面，**複審規則一定成立**。
+  // 這兩條規則原本只寫在 skill 的散文裡，靠模型自己記得寫進 prompt ——
+  // 而腳本明明知道現在第幾輪。那正是這個 repo 到處在罰的安排（散文 = 沒有人在守）。
+  // 外部前案：Claude Code 官方 REVIEW.md 的 re-review convergence，原文說這條可以
+  // "stop a one-line fix from reaching round seven on style alone"。
+  const next = r.n + 1;
   const lines = [];
-  lines.push(`## 上一輪（R${r.n}）你提出的項目，與我的處理`);
+  lines.push(`## 本輪是 R${next}（複審輪）—— 先讀規則，再讀項目`);
   lines.push('');
-  lines.push('⚠️ 請**逐項**確認是否真的收口。沒收口的直接說沒收口，不要重新發散到別的題目。');
+  lines.push(`1. **只報 BLOCKER 級別。不要提出新的 POLISH。**`);
+  lines.push('2. **逐項**確認上一輪那些項目是否真的收口。沒收口的直接說沒收口。');
+  lines.push('3. 除了上面那些項目、以及「為了收口而新加的東西」之外，**不要重新發散到別的題目**。');
+  lines.push('4. BLOCKER 一樣必須帶 `[FAIL] <什麼輸入或狀態> -> <什麼錯誤結果>`；講不出來的不要報。');
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+  lines.push(`## 上一輪（R${r.n}）你提出的項目，與我的處理`);
   lines.push('');
   for (const b of r.blockers) {
     lines.push(`### ${b.id}（BLOCKER）`);
@@ -420,8 +475,20 @@ function promptBlock(stage) {
   lines.push(FORMAT_SPEC);
   lines.push('```');
   lines.push('');
-  lines.push('沒有 BLOCKER 就只列 P 行（或整個區塊留空），**不要省略區塊本身**。');
+  // 複審輪不收新 POLISH（上面規則 1）⇒ 這裡不能再叫它「沒有 BLOCKER 就列 P 行」，
+  // 否則同一份 prompt 自相矛盾，而模型會挑對它比較省事的那一句。
+  // FORMAT_SPEC 本身不改 —— 它是 R1/R2 共用的**格式**單一來源，動它會讓 R1 收不到 POLISH。
+  lines.push('⚠️ 上面範本裡的 `P1` 行只是**格式示意**。本輪不收新 POLISH（規則 1）⇒ **不要列 P 行**。');
+  lines.push('');
+  lines.push('沒有 BLOCKER 就讓區塊**留空**（保留頭尾兩行），**不要省略區塊本身**。');
   console.log(lines.join('\n'));
+
+  // ⚠️ effort 是呼叫端的旗標，不是 prompt 內容 ⇒ 走 stderr 給操作者，不要污染 stdout。
+  // stdout 是要整段貼進 prompt 的素材；把「請用 medium」貼給 Codex 沒有任何作用。
+  console.error(`review-state: 下一輪是 R${next}（複審輪）⇒ `
+    + 'codex 的 model_reasoning_effort 要比上一輪降一級，且不高於 medium。\n'
+    + '  理由：low/medium 只報最有信心的 findings，high 以上會包含它自己也不確定的。'
+    + '第一輪要廣，之後要準。');
 }
 
 // ── --status ───────────────────────────────────────────────────────────

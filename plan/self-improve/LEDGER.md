@@ -96,6 +96,8 @@
 | **R2 起降 effort 到 medium、只報 BLOCKER、不提新 POLISH** | 已寫進契約 | 同上的 re-review convergence：原文說可以 "stop a one-line fix from reaching round seven on style alone" |
 | **POLISH 上限 5 條，其餘給數量** | 已寫進契約 | 同上 Nit volume：「Prose and config files can be polished forever」 |
 | **軌跡 `new_citations`**：這輪指了幾個先前沒指過的位置 | 已實作 | —（自製，純字串處理不判語意） |
+| **R2 起的複審規則由 `--prompt-block` 自動帶**（只報 BLOCKER、不提新 POLISH） | **已實作（0.6.0）** | 同上 re-review convergence。**規則本來就在契約裡，但只寫在散文，靠模型記得抄** —— 而腳本明明知道第幾輪 |
+| **`divergence_hint`**：R2 起，findings 全指新位置且條數沒下降 ⇒ 提示「該拆該減」 | **已實作（0.6.0，提示非閘門）** | §2 的判準機械化。腳本量不到「規格變長」，但量得到同一件事的另一面 |
 | **停點問編輯的問題**（哪幾條夠格擋關），不問「還要不要繼續」 | 已實作 | PLOS／ICMJE 的審稿人—編輯分離 |
 | **派 agent 當編輯做裁決** | **回測過，可用**，但**只能當簡報不能當閘門** | 見 `design-green-semantics` §6c |
 | **要求編輯給可否證條件** | 回測中最有價值的產物：它列的三條重現測試，當場作廢掉三分之二的 BLOCKING | — |
@@ -132,6 +134,28 @@ target**（同 §2 的判準）。**不要**叫它少讀、餵它預擷取的片
 這些腳本到處用 `process.exit` 表達 rc（`usage()` 是 2、STOP_ASK_OWNER 是 20…）。
 把釋放寫在 `finally` 裡**不會執行** ⇒ 鎖漏在磁碟上 ⇒ 下一個指令被自己卡住。
 ⇒ 必須同時掛 `process.on('exit', release)`。已有回歸測試守著。
+
+**M5 — 收斂規則的落點：審查端已經滿了，修訂端還是空的（2026-09-02）**
+
+盤點 0.5.0 的收斂機制，全部落在**審查端**（`[FAIL]` 欄位、哨兵格式、逐項核對、輪數上限）。
+**修訂端一條規則都沒有** —— 而 §2 的診斷說發散的正是修訂端。
+
+三個當時可指認的缺口，以及處置：
+
+| 缺口 | 0.5.0 的狀態 | 0.6.0 |
+|---|---|---|
+| R2 起「只報 BLOCKER、不提新 POLISH」 | 只在 skill 散文裡，靠模型記得抄進 prompt | **`--prompt-block` 自動帶**。它只在有前輪時才有輸出 ⇒ 產出必然是 R2+，規則恆成立 |
+| 「findings 沒下降＋全打新位置」的訊號 | `trajectory` 算得出來，但只在 R3 停點才印 | **R2 就印 `divergence_hint`**。等到 R3 才講，那一輪修訂已經白做 |
+| 「收口該長什麼形狀」 | 完全沒寫（`--resolve --how` 是自由文字） | 只寫進 `divergence_hint.do` 的優先序：刪機制 > 縮 target > 記為已知缺口 > 才是加新機制。**仍未機械化，也不打算** —— 那是價值判斷 |
+
+⚠️ **effort 指示必須走 stderr。** `--prompt-block` 的 stdout 是要整段貼進 prompt 的素材；
+把「請用 medium」貼給 Codex 沒有作用，effort 是呼叫端旗標。有回歸測試守著這條分流。
+
+⚠️ **`divergence_hint` 不是閘門**，不改 verdict / exit code / 狀態檔。
+理由同 §4 最後一段：「該拆該減」是編輯的價值判斷。**沒出現提示也不代表在收斂** ——
+三個觸發條件很窄，只抓最明確的那個形狀。
+
+重驗：`node --test plugins/spec-pipeline/tests/review-state.test.mjs`（0.6.0 為 57 項）
 
 **M4 — 審查耗時與 effort（2026-09-01）**
 

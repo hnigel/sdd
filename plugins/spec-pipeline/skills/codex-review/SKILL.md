@@ -109,21 +109,39 @@ S3/S5 是給**走完整流程的任務**用的。幾行文字的改動應該在 
 「after the first review, suppress new nits and post Important findings only」的規則可以
 "stop a one-line fix from **reaching round seven** on style alone"）。
 
-| 輪次 | effort | prompt 要寫死的規則 |
-|---|---|---|
-| **R1** | `xhigh` | 完整審查 |
-| **R2 起** | `medium` | 「**只報 BLOCKER 級別。不要提出新的 POLISH。**」 |
+| 輪次 | effort | prompt 規則 | 誰負責 |
+|---|---|---|---|
+| **R1** | `xhigh` | 完整審查 | 你（R1 沒有前輪，`--prompt-block` 回 `rc=10`） |
+| **R2 起** | `medium` | 「**只報 BLOCKER 級別。不要提出新的 POLISH。**」 | **`--prompt-block` 自動帶** |
 
 為什麼降 effort：官方文件明說 `low`/`medium` 只報**最有信心**的 findings，
 而 `high` 以上 "**may include findings the review is less sure about**"。
 第一輪要廣，之後要準 —— 每輪都開 xhigh 等於主動選最會找碴的檔位，再對它的產出零容忍。
 
-**POLISH 上限**：prompt 要求「最多列 5 條 POLISH，其餘只給一個數量」。
+**POLISH 上限**：R1 的 prompt 要求「最多列 5 條 POLISH，其餘只給一個數量」。
 理由同樣是官方文件那句：「**Prose and config files can be polished forever**」——
 規格就是散文，可以被無限打磨。
+（R2 起不必寫這條：那時規則已經是**完全不收新 POLISH**。）
 
-⚠️ **這兩條規則是 prompt 的責任，腳本不強制。** 腳本強制的只有
-`review-state.mjs` 的哨兵格式與 `[FAIL]` 欄位（那是**形式**檢查，不是品質判斷）。
+### ⚠️ R2 起的規則現在由腳本帶，不要自己抄一份
+
+`--prompt-block <stage>` 只在**已經有一輪**時才有輸出 ⇒ **它產出的必然是 R2 或更後面的複審輪**。
+所以它一定會把這四條寫進素材裡：
+
+1. 只報 BLOCKER 級別，不要提出新的 POLISH
+2. 逐項確認上一輪是否真的收口
+3. 不要重新發散到別的題目
+4. BLOCKER 必須帶 `[FAIL] … -> …`
+
+⇒ **把 stdout 整段貼進 prompt 就好，不要自己重寫一份**（重寫就是複製，複製就會漂移）。
+
+⚠️ **effort 走 stderr，不在 stdout 裡。** stdout 是要整段貼進 prompt 的素材；
+把「請用 medium」貼給 Codex 沒有任何作用 —— effort 是**呼叫端的旗標**。
+所以 `--prompt-block` 會另外在 stderr 印一行提醒你把 `-c model_reasoning_effort` 降下來。
+
+⚠️ 腳本強制的仍然只有**形式**：哨兵格式與 `[FAIL]` 欄位。
+「只報 BLOCKER」是寫進 prompt 的**要求**，不是腳本能驗的東西 ——
+Codex 真的多報了 POLISH，腳本照樣收（那不是假綠，POLISH 本來就不擋關）。
 
 ### BLOCKER 必須講得出失效情境
 
@@ -250,6 +268,26 @@ rs --status S3                                    # green_allowed 在這裡看
 ⚠️ `rc=21` 有兩種成因：**review 沒跑完**、或 **prompt 沒帶哨兵格式**。
 兩種都代表「這次沒拿到可用結果」，都不計為一輪、都不得放行。
 真的要手動宣告條數用 `--blockers <n>`（明確、可稽核，但不是預設路徑）。
+
+### ⚠️ `divergence_hint`：看到它就不要再審一輪
+
+`--record` 在 **R2 起**可能多回一個 `divergence_hint` 欄位。觸發條件是機械的，三條同時成立：
+
+- 這一輪的 findings **指的位置全部**是先前各輪沒指過的；
+- findings 條數**沒有下降**；
+- 至少有一個 `檔案:行號` 引用。
+
+意思是：**這一輪打的是你上一輪為了收口而新加的東西** ⇒ 發散的是**修訂**，不是審查。
+（run1 實測正是這個形狀：R2 打新機制 4/4、R3 打新機制 5/5，行數每輪 +38，
+findings 穩在 4–5 條 —— 兩個速率都沒下降，那不是收斂，是穩態。）
+
+⇒ **該拆該減，不是再審一輪。** 優先序：刪掉那個機制 > 縮小 review target >
+誠實記為已知缺口 > 才是加新機制（而且加了就要預期下一輪打它）。
+
+⚠️ **這是提示，不是閘門。** 它不改 `verdict`、不改 exit code、不寫進狀態檔。
+「該拆該減」是編輯的價值判斷，腳本不做那個判斷（理由見 LEDGER §4）。
+
+⚠️ 沒有出現 `divergence_hint` **不代表在收斂** —— 三個條件很窄，它只抓最明確的那個形狀。
 
 ### 跨 session 現在可以接續了
 

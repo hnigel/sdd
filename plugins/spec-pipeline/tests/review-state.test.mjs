@@ -443,6 +443,136 @@ describe('⭐⭐ 停止條件是機械的', () => {
     } finally { cleanup(); }
   });
 
+  describe('⭐⭐ 發散提示：R2 就講，不必等 R3 的停點', () => {
+    // LEDGER §2 的判準：一次修訂讓 findings 沒下降、而且全打在新位置上
+    // ⇒ 發散的是**修訂**不是審查。等到 R3 停點才印，那一輪修訂就白做了。
+    const FRESH_R2 = BLOCK(
+      'B1 BLOCKER new.mjs:10 [FAIL] a -> b',
+      'B2 BLOCKER new.mjs:20 [FAIL] c -> d',
+      'B3 BLOCKER new.mjs:30 [FAIL] e -> f',
+    );
+
+    it('R2 全打新位置且 findings 沒下降 → NEEDS_FIX 帶 divergence_hint', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'r1.log', TWO_BLOCKERS));
+        run(dir, '--resolve', 'S3', '--item', 'B1', '--how', '加了一層 new.mjs');
+        run(dir, '--resolve', 'S3', '--item', 'B2', '--how', '加了一層 new.mjs');
+        const r2 = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'r2.log', FRESH_R2));
+
+        assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+        const out = JSON.parse(r2.stdout);
+        assert.equal(out.verdict, 'NEEDS_FIX', '提示不得改變 verdict');
+        assert.ok(out.divergence_hint, 'R2 就該講，不是等 R3');
+        assert.match(out.divergence_hint.means, /發散的是/);
+        assert.match(out.divergence_hint.do, /該拆該減/);
+        assert.match(out.divergence_hint.note, /不是閘門/);
+        assert.ok(Array.isArray(out.trajectory), '提示要附軌跡才看得出形狀');
+      } finally { cleanup(); }
+    });
+
+    it('提示不是閘門：exit code 與狀態檔都不因它改變', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 's1.log', TWO_BLOCKERS));
+        run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+        run(dir, '--resolve', 'S3', '--item', 'B2', '--how', 'y');
+        const r2 = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 's2.log', FRESH_R2));
+        assert.equal(r2.status, 0);
+        assert.ok(JSON.parse(r2.stdout).divergence_hint);
+        // 提示是輸出，不入檔 —— 狀態檔裡不該多出任何一個欄位
+        const st = state(dir).stages.S3;
+        assert.equal(st.rounds.length, 2, '輪數照常增加');
+        assert.ok(!JSON.stringify(st).includes('divergence'), '提示不得寫進狀態檔');
+      } finally { cleanup(); }
+    });
+
+    it('原地繞（打同一批位置）→ 不提示，那不是發散', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 't1.log', TWO_BLOCKERS));
+        run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+        run(dir, '--resolve', 'S3', '--item', 'B2', '--how', 'y');
+        const r2 = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 't2.log', TWO_BLOCKERS));
+        assert.equal(r2.status, 0);
+        assert.ok(!JSON.parse(r2.stdout).divergence_hint, '同一批位置是原地繞，不是長出新表面');
+      } finally { cleanup(); }
+    });
+
+    it('findings 有下降 → 不提示，那正在收斂', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'u1.log', FRESH_R2));
+        for (const i of ['B1', 'B2', 'B3']) run(dir, '--resolve', 'S3', '--item', i, '--how', 'x');
+        // 全新位置，但條數 3 → 1
+        const r2 = run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'u2.log', BLOCK('B1 BLOCKER other.mjs:5 [FAIL] a -> b')));
+        assert.equal(r2.status, 0);
+        assert.ok(!JSON.parse(r2.stdout).divergence_hint, 'findings 下降就是在收斂，不該叫人拆');
+      } finally { cleanup(); }
+    });
+
+    it('R1 不提示（沒有前輪可比，引用當然全新）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const r1 = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'v1.log', TWO_BLOCKERS));
+        assert.equal(r1.status, 0);
+        assert.ok(!JSON.parse(r1.stdout).divergence_hint);
+      } finally { cleanup(); }
+    });
+  });
+
+  describe('⭐⭐ 複審規則由腳本帶下去，不靠模型記得', () => {
+    it('prompt-block 一定帶「只報 BLOCKER、不要新 POLISH」與輪次', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'w1.log', TWO_BLOCKERS));
+        const b = run(dir, '--prompt-block', 'S3');
+        assert.equal(b.status, 0, b.stderr);
+        assert.match(b.stdout, /R2（複審輪）/, '要講明這是第幾輪的複審');
+        assert.match(b.stdout, /只報 BLOCKER 級別/);
+        assert.match(b.stdout, /不要提出新的 POLISH/);
+        assert.match(b.stdout, /不要重新發散/);
+        // 自相矛盾檢查：既然不收新 POLISH，就不能同時叫它「沒有 BLOCKER 就列 P 行」
+        assert.ok(!/沒有 BLOCKER 就只列 P 行/.test(b.stdout), '同一份 prompt 不得自相矛盾');
+        assert.match(b.stdout, /留空/);
+        // FORMAT_SPEC 是 R1/R2 共用的格式來源，裡面留著 P1 行 ⇒ 複審輪要明講那只是示意
+        assert.match(b.stdout, /格式示意/, '範本的 P1 行不關掉，規則 1 就形同虛設');
+        assert.match(b.stdout, /<<<FINDINGS>>>/, '格式要求仍要帶下去');
+      } finally { cleanup(); }
+    });
+
+    it('輪次會跟著走：R2 之後產生的是 R3 的規則', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const l = log(dir, 'x1.log', TWO_BLOCKERS);
+        run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+        run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+        assert.match(run(dir, '--prompt-block', 'S3').stdout, /R3（複審輪）/);
+      } finally { cleanup(); }
+    });
+
+    it('effort 指示走 stderr —— stdout 是要整段貼進 prompt 的素材', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'y1.log', TWO_BLOCKERS));
+        const b = run(dir, '--prompt-block', 'S3');
+        assert.match(b.stderr, /model_reasoning_effort/, 'effort 是呼叫端旗標，給操作者看');
+        assert.match(b.stderr, /medium/);
+        assert.ok(!/model_reasoning_effort/.test(b.stdout),
+          '不得污染 stdout —— 把「請用 medium」貼給 Codex 沒有任何作用');
+      } finally { cleanup(); }
+    });
+  });
+
   describe('⭐⭐ BLOCKER 必須講得出失效情境', () => {
     it('B 行缺 [FAIL] ⇒ rc=2，不做寬容降級', () => {
       const { dir, cleanup } = sandbox();
