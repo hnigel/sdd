@@ -51,7 +51,7 @@
 | **F-版本號**：`claude plugin update` **比版本號，不比 commit**。改了 `plugins/` 卻不 bump，使用者會拿到 `already at the latest version`——**語氣是成功的，所以沒人會去查**，而 cache 停在舊 commit | `claude plugin list` 看版本；doctor 看 `plugin_pin` 的 sha |
 | **F-兩個 scope**：`installed_plugins.json` 的結構是 `{version, plugins: {"名稱@marketplace": [...]}}`（**巢狀一層**），同一個 plugin 可能同時有 user 與 project scope，`update` 的 `--scope` **預設只更新 user** | `node .../doctor.mjs` 看 `plugin_pin` |
 | **F-zsh**：`RS="node x.mjs"; $RS --flag` 依賴 shell 對未加引號展開做分詞。**bash 會，zsh 預設不會**，而 macOS 預設 shell 是 zsh。⇒ 一律用 shell function | `zsh -c 'RS="node --version"; $RS'`（本機無 zsh，未實測，見 §6） |
-| **F-兩台不同版**（2026-09-03）：owner 的 Mac 原本裝的是 **0.1.0（project scope，commit `e7f60e0`，掛在另一個專案）**，而 repo 已到 0.6.0 —— 中間十五個 commit 的硬化在那台上一個都沒有。已改裝 **user scope 0.6.0（`fddae17`）**。⚠️ 那個舊的 project-scope 0.1.0 **仍然存在**，兩份會繼續漂 | `node ~/.claude/plugins/cache/sdd/spec-pipeline/*/scripts/doctor.mjs` 看 `plugin_pin` |
+| **F-兩台不同版**（2026-09-03，當日已解）：owner 的 Mac 原本裝的是 **0.1.0（project scope，`e7f60e0`，掛在另一個專案）**，而 repo 已到 0.6.0 —— 中間十五個 commit 的硬化在那台上一個都沒有。**同日改裝 user scope，並移除那份 project scope** ⇒ `plugin_pin` 現在只有一列。<br>⚠️ **移除前要先看那個專案有沒有進行中的狀態**：`.claude/review-state.json` 與 `spec-freeze.json` 存在**專案裡**、不在 plugin cache 裡，所以 uninstall 不會動到它們（實測時間戳未變）；但版本會從 0.1.0 跳到最新，**先拿狀態檔的複本跑一次新版 `--status` 確認讀得動再移除** | `node ~/.claude/plugins/cache/sdd/spec-pipeline/*/scripts/doctor.mjs` 看 `plugin_pin`（應只有一列） |
 | **F-過期**：以上每一條都曾經、或可能再度過期。**帶版本號或機器狀態的「實測事實」必須同段附重驗指令，並標明哪台機器**——這是設計原則④ | — |
 
 ---
