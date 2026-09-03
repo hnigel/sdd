@@ -27,7 +27,10 @@ import { validate } from './lib/validate-config.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-// 契約釘死的值（codex-review skill 的共同前綴）。config 漂移時用來比對。
+// probe 用的固定值，**不是契約釘值**。
+// ⚠️ 契約只釘 model；effort 依 target 行數決定（codex-review skill 的 effort 表），
+//    所以這裡的 xhigh 只是「拿某個值去打一次看環境活不活」，不代表流程該用它。
+//    config 漂移的比對也只對 model 有意義。
 const PINNED_MODEL = 'gpt-5.6-sol';
 const PINNED_EFFORT = 'xhigh';
 

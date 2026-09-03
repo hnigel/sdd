@@ -110,7 +110,7 @@ S0 只給**建議**（`hard`→Fable、`normal`→Opus）。你打 `/fable` 或 
 ## Step 3 — S2 規格 → S3 Codex 審規格
 
 寫成文件（位置照專案慣例，例如 `plan/<主題>/design-<日期>.md`），
-然後**載入 `codex-review` skill**、走**模式 A**。
+然後**載入 `codex-review` skill**（它只有一種模式：plain `exec` ＋ 自己寫的 prompt）。
 （它是 skill 不是斜線指令 —— 沒有 `/codex-review` 這個東西。）
 
 輪數與收口狀態由腳本持有，**不要自己數**：
@@ -128,6 +128,21 @@ rs --prompt-block S3                  # 產生下一輪要貼的「上輪 findin
 **zsh 預設不分詞**，而 macOS 預設 shell 是 zsh。詳見 `codex-review` skill 同一段。
 
 ⚠️ **S3 不 GREEN 不進 Step 4。** GREEN 的判定看 `--status S3` 的 `green_allowed`。
+
+### ⚠️ `green_allowed: true` 有兩種來源，只有一種可以直接凍結
+
+| 來源 | 可以凍結嗎 |
+|---|---|
+| 最後一輪**本來就零 BLOCKER** | ✅ 可以 |
+| 最後一輪有 BLOCKER、靠 `--resolve` 全部標記完 | ❌ **那是自我回報** |
+
+第二種時 `--status` 會多印一個 `green_is_weak_signal` 欄位。看到它就**再跑一輪複審**
+（用 `--prompt-block` 產生素材），拿到零 BLOCKER 或 STOP 之後才凍結。
+
+⚠️ **凍結腳本擋不住這條路，是你自己要走對。** 這是已知缺口（LEDGER §6 的 `green_allowed`
+仍是自我回報），六輪審查證明「怎麼判定 GREEN」那一層還沒收斂，所以**不立一道擋不住的閘** ——
+誠實記載勝過製造錯覺。真實案例：操作者看到 `green_allowed: true` 之後人工否決它，
+理由是「規格從 357 改到 569 行，動了很多新機制，那些是 R1 沒審過的新東西」。
 
 S3 收口之後**凍結規格**：
 
@@ -162,7 +177,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-freeze.mjs" --check
 （見下方第 6 條）。
 
 然後跑 `pipeline.json` 的 `verify_cmd`，**RC 寫檔再讀**，
-再**載入 `codex-review` skill**、走模式 A 審 code（輪數一樣交給 `review-state.mjs`，stage 用 `S5`）。
+再**載入 `codex-review` skill** 審 code（輪數一樣交給 `review-state.mjs`，stage 用 `S5`）。
 
 ---
 

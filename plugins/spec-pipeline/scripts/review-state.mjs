@@ -36,6 +36,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { withLock, atomicWrite } from './lib/state-lock.mjs';
 
 const ROOT = process.cwd();
@@ -307,7 +308,11 @@ function record(stage, rc, logFile, blockersOverride) {
     }, null, 2));
     process.exit(20);
   }
-  const raw = fs.readFileSync(logFile, 'utf8');
+  // C7（v7 出貨項）—— 讀成 Buffer，一次拿到內容、sha256 與**位元組**長度。
+  // ⚠️ `log_bytes` 要的是 raw byte 長度（Buffer.length），不是字元數 ——
+  //    非 ASCII 的 log 兩者不同，而 codex 的 log 一定有中文。
+  const buf = fs.readFileSync(logFile);
+  const raw = buf.toString('utf8');
 
   const reviewError = (why, note) => {
     st.invocation_failures.push({ at: new Date().toISOString(), rc, log: logFile, why });
@@ -363,6 +368,12 @@ function record(stage, rc, logFile, blockersOverride) {
   const n = st.rounds.length + 1;
   st.rounds.push({
     n, at: new Date().toISOString(), rc, log: logFile,
+    // ⚠️ 純 metadata，**不是閘門**。`log` 存的是揮發的 mktemp 路徑，run 結束就沒了；
+    //    這兩個欄位讓「當時記的是哪一份 log」事後還對得上。
+    //    ⚠️ 這**不宣稱**解掉 G4（log 無 provenance）—— mtime 版死過（D8），
+    //    內容雜湊一樣證明不了「這份 log 是這一輪剛跑出來的」。
+    log_sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+    log_bytes: buf.length,
     findings_block: parsed.block,
     blockers: parsed.blockers,
     polish: parsed.polish,
@@ -497,6 +508,24 @@ function status(stage) {
   const st = stageOf(s, stage);
   const r = lastRound(st);
   const open = openBlockers(st);
+
+  /**
+   * C1-6（v7 出貨項）—— `green_allowed` 是**弱訊號**時多印一行。
+   *
+   * ⚠️ **這不是閘門。** 不改 `green_allowed` 的值、不改 exit code、不寫狀態檔。
+   *
+   * 為什麼要有：`green_allowed` 的收口判定是自我回報 —— `--resolve` 把最後一輪的
+   * BLOCKER 全部標記完，**不需要任何複審輪**就會變 true（F1）。真實操作者靠人工
+   * 否決過它（F10 逐字：「green_allowed: true 只是『六條都已標記處理』，不代表通過」）。
+   *
+   * 六輪審查證明「怎麼判定 GREEN」那一層尚未收斂（三版機制全被打掉，其一還是審查者
+   * 自提後自行撤回），所以**不修語意，只補訊號**。強行立一道擋不住的閘比沒有閘更糟。
+   *
+   * 與死路 D3（時間 proxy）的差別：這裡不看時間，看的是「最後一輪有 BLOCKER 且
+   * 全部 resolved」這個**已經在狀態檔裡的事實**。
+   */
+  const weakGreen = Boolean(r) && open.length === 0 && (r.blockers ?? []).length > 0;
+
   console.log(JSON.stringify({
     stage,
     task: st.task,
@@ -506,6 +535,11 @@ function status(stage) {
     open_blockers: open.map((b) => b.id),
     trajectory: trajectory(st),
     green_allowed: Boolean(r) && open.length === 0,
+    ...(weakGreen ? {
+      green_is_weak_signal: '已全部標記處理，但**未經複審輪確認** —— green_allowed 是弱訊號，'
+        + `建議再送一輪複審（\`--prompt-block ${stage}\` 產生素材），拿到零 BLOCKER 或 STOP 之後再凍結。`
+        + '（這不是閘門，green_allowed 的值沒有因為這行改變；見 design-green-semantics）',
+    } : {}),
     note: !r ? '還沒有有效的一輪 ⇒ 不得 GREEN'
       : open.length ? `還有 ${open.length} 條未收口 ⇒ 不得 GREEN`
         : '本階段無未處理 BLOCKER（GREEN 仍需 verify_cmd RC=0）',

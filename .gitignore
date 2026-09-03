@@ -5,3 +5,8 @@ node_modules/
 .claude/fast-baseline.json
 .claude/review-state.json
 .claude/spec-freeze.json
+
+# 前案搜集素材（85 個 GitHub 專案的機制筆記）
+# 不進版控：內容是 subagent 產出且機制描述未經覆核，
+# 進了版控會變成「看起來像查證過的事實」——這個 repo 被那個形狀咬過。
+ref/

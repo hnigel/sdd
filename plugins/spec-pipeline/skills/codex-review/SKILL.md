@@ -5,7 +5,9 @@ description: 用 Codex（異廠商）審規格或審 code。把呼叫契約、RC
 
 # Codex Review — 異廠商審查的單一來源
 
-> 事實重驗日：**2026-09-01，codex-cli 0.144.1**（`codex --version`）。
+> ⚠️ **這份是呼叫契約，不是事實表。** 機器事實（版本、config 值、量測）全部在
+> `plan/self-improve/LEDGER.md` §1，**引用前先跑它的重驗指令** ——
+> 這份文件裡刻意不寫版本號，因為寫死的版本號就是會過期的東西。
 >
 > ⚠️ **每條帶版本號或機器狀態的事實，都必須同段附 30 秒可跑的重驗指令。**
 > 理由見下方「三條曾經寫錯的事實」—— 這一段自己就過期過一次，而且沒有訊號。
@@ -15,18 +17,24 @@ description: 用 Codex（異廠商）審規格或審 code。把呼叫契約、RC
 
 ---
 
-## 選哪一種模式（先決定，選錯會拿不到你要的東西）
+## 只有一種模式：plain `exec` ＋ 自己寫的 prompt
 
-| 你要的 | 用哪個 |
-|---|---|
-| **自訂格式**（BLOCKER/POLISH、逐項複核上一輪）、審規格、問開放問題 | **模式 A：plain `exec`** |
-| 只要一份不帶格式要求的 code 初審 | 模式 B：`review` 子命令 |
+```
+codex ... exec ... - < prompt.txt
+```
 
 ⚠️ **`--commit` / `--uncommitted` / `--base` 都不能與 PROMPT 併用**（實測 `rc=2`）。
-所以**想要自訂格式就只能用模式 A** —— 在 prompt 裡自己寫死 review target 與基準 SHA。
+所以**要自訂格式就只能走這條** —— 在 prompt 裡自己寫死 review target 與基準 SHA。
 
-> 實證：2026-08-31 的一個實際 session，code review 全走模式 B，**從來沒能傳自訂格式**；
-> plan review 走模式 A，BLOCKER/POLISH 格式一次就生效，也是它讓一輪見底。
+### ⚠️ 不要用 `codex exec review` 子命令
+
+它的輸出**沒有哨兵區塊** ⇒ `review-state.mjs --record` 必然回 `rc=21`，這一輪不算數。
+換句話說那是一條走下去一定拿不到結果的路，S3 與 S5 都不要用。
+（它走的也正是 README「刻意不做」列的那個 shared built-in reviewer。）
+
+> 實證：2026-08-31 的一個實際 session，code review 全走 `review` 子命令，
+> **從來沒能傳自訂格式**；plan review 走 plain `exec`，BLOCKER/POLISH 格式一次就生效，
+> 也是它讓一輪見底。
 
 ---
 
@@ -44,11 +52,11 @@ CX=(codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -c "model_reasonin
 | `-s read-only` | **review 不得改檔**。沒有這個，plain `exec` 是可以動工作樹的 |
 | `-a never` | 不要求核准，背景跑得動 |
 | `-m gpt-5.6-sol` | 不釘住就吃 per-machine config，換機會選錯模型 |
-| `-c 'model_reasoning_effort="xhigh"'` | 同理。**R1 用 xhigh，R2 起改 `medium`** —— 見下方「第二輪起要降級」 |
+| `-c 'model_reasoning_effort="…"'` | 同理。**值依 target 大小決定，不是固定 xhigh** —— 見下方唯一那張 effort 表 |
 
 ---
 
-## Step 1: 寫 prompt 檔（模式 A）
+## Step 1: 寫 prompt 檔
 
 放在唯一暫存目錄，**不要用固定路徑**。
 
@@ -69,7 +77,7 @@ prompt 必須自己寫死這些（因為不能用 `--commit`）：
 | **< 50 行** | `low` | 幾行字不需要最高推理預算。官方文件：`low`/`medium` **只報最有信心的 findings** |
 | **50–300 行** | `medium` | |
 | **> 300 行，或已知是 hard 任務的 R1** | `xhigh` | 要廣度時才用 |
-| **R2 起（任何大小）** | 降一級，且至少不高於 `medium` | 見下一節 |
+| **R2 起（任何大小）** | 降一級，且不高於 `medium`；**R1 已是 `low` 就維持 `low`** | 見下方「第二輪起要降級」 |
 
 ⚠️ **釘死 `-m` 與 `-c` 這件事不變** —— 變的是 `-c` 帶什麼值，不是改回繼承 config
 （config 會漂移，見「三條曾經寫錯的事實」①）。
@@ -78,8 +86,8 @@ prompt 必須自己寫死這些（因為不能用 `--commit`）：
 
 即使 target 只有幾行，只要 prompt 說「對抗性地審」「請開檔核對」，
 它就會去探索整個 repo —— 2026-09-01 實測：一輪開 7–17 個相異檔案，
-log 有 **90.6%** 是 `nl -ba` 倒進來的檔案內容（那是 stdout 注入，不是它在生成，
-但它仍然要讀完）。
+log 絕大部分是 `nl -ba` 倒進來的檔案內容（實測比例見 LEDGER M1；那是 stdout 注入，
+不是它在生成，但它仍然要讀完）。
 
 ⇒ target 小的時候，prompt 要明寫圍籬：
 
@@ -109,12 +117,9 @@ S3/S5 是給**走完整流程的任務**用的。幾行文字的改動應該在 
 「after the first review, suppress new nits and post Important findings only」的規則可以
 "stop a one-line fix from **reaching round seven** on style alone"）。
 
-| 輪次 | effort | prompt 規則 | 誰負責 |
-|---|---|---|---|
-| **R1** | `xhigh` | 完整審查 | 你（R1 沒有前輪，`--prompt-block` 回 `rc=10`） |
-| **R2 起** | `medium` | 「**只報 BLOCKER 級別。不要提出新的 POLISH。**」 | **`--prompt-block` 自動帶** |
+**effort 看上面那張表就好（唯一一張）。** 這一節只講 prompt 規則。
 
-為什麼降 effort：官方文件明說 `low`/`medium` 只報**最有信心**的 findings，
+為什麼 R2 起要降 effort：官方文件明說 `low`/`medium` 只報**最有信心**的 findings，
 而 `high` 以上 "**may include findings the review is less sure about**"。
 第一輪要廣，之後要準 —— 每輪都開 xhigh 等於主動選最會找碴的檔位，再對它的產出零容忍。
 
@@ -202,12 +207,6 @@ tmp="$(mktemp -d)"
 "${CX[@]}" - < "$tmp/prompt.txt" > "$tmp/out.log" 2>&1
 rc=$?; printf '%s' "$rc" > "$tmp/rc"
 echo "tmp=$tmp rc=$rc"
-```
-
-**模式 B**（無自訂 prompt 的初審）：
-```bash
-codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol \
-  -c 'model_reasoning_effort="xhigh"' review --commit <sha> > "$tmp/out.log" 2>&1
 ```
 
 ⚠️ 用 Bash tool 跑時**一定要 `run_in_background: true`** —— 高 effort 的 review 常
@@ -301,56 +300,38 @@ findings 穩在 4–5 條 —— 兩個速率都沒下降，那不是收斂，�
 
 ---
 
-## ⚠️ 三條曾經寫錯的事實（2026-08-31 更正）
+## ⚠️ 機器事實一律去 LEDGER 查，不要信這份文件裡的數字
 
-**這一段存在的理由**：這些原本以「本機實測」的口吻寫在筆記裡，看起來很可信，
-但其中三條在同一台機器的今天已經不成立。**帶版本號的實測筆記也會過期，而且沒有訊號。**
+**帶版本號或機器狀態的事實不放在這裡**（`codex --version`、`~/.codex/config.toml` 的值、
+log 行數比例、banner 走哪條串流…）。它們在 **`plan/self-improve/LEDGER.md` §1**，
+每條附 30 秒重驗指令。**引用任何一條之前先跑它的重驗指令。**
 
-### ① effort 從 config 繼承，而 config 會漂移
+為什麼要搬走：這些事實原本同時存在兩份文件裡，過期時要改兩處 ——
+而這個 repo 的漂移史全部是「兩份東西、沒有訊號」。
 
-```
-2026-08-31 這份文件寫：  model = "gpt-5.6-sol" / model_reasoning_effort = "xhigh"
-2026-09-01 同一台實際是：model = "gpt-5.5"     / model_reasoning_effort = "medium"
-```
-重驗：`cat ~/.codex/config.toml`
+> **活教材**：這一節的舊版曾經斷言「本機從未出現過 `0.150.0-alpha.7`，那想必是另一台機器」。
+> 2026-09-03 在 owner 的 Mac 上跑 `codex --version`，答案就是 **`0.150.0-alpha.7`**。
+> 那句話不是錯，是**它從來只對某一台機器成立，而文件沒說是哪台**。
+> ⇒ 機器事實要標明「哪台、哪天、怎麼重驗」，否則它遲早會被當成普遍事實引用。
 
-**同一台機器，一天之內就漂了。** 而且沒有任何訊號。
+### 唯一留在這裡的兩類（因為它們是**呼叫契約**，不是機器狀態）
 
-⇒ 結論不變而且更強：**不要靠 config，一律在呼叫點明寫 `-m` 與 `-c`。**
-活證據：2026-08-31 那次真實 S3 審查的 log 首行是 `model: gpt-5.6-sol` /
-`reasoning effort: xhigh`、rc=0 —— config 當時已經漂了，是明寫救了那一輪。
-反向重驗（**不帶** `-c` 跑一次，看 stderr）：
-`echo '只回答兩個字：ok' | codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol -`
-2026-09-01 實跑印出 `reasoning effort: medium` —— 當場繼承了漂移值。
-
-⚠️ **banner 走 stderr，stdout 只有答案。** 想在腳本裡驗 model/effort 就不能用
-`execFileSync`（只回 stdout），要用 `spawnSync` 取雙串流。
-
-### ② `-C` 是**位置**問題，不是不支援
+**① `-C` 是位置問題，不是不支援**
 
 | 寫法 | rc |
 |---|---|
-| `codex -C X exec review` | **0** |
-| `codex exec -C X review` | **0** |
-| `codex exec review -C X` | **2** |
+| `codex -C X exec …` | **0** |
+| `codex exec -C X …` | **0** |
+| `codex exec … -C X` | **2** |
 
-### ③ 「參數錯誤有上千行看起來正常的輸出」在本機重現不出來
-
-三種 parser error 都是 `RC=2` 且**只有 5–11 行明確錯誤**。
-原觀察可能來自別的失敗模式或舊版本，**不要拿它當除錯依據**。
-（結論不變：**RC 一律寫檔再讀**。）
-
-⚠️ 這一條原本綁著一個**本機從未出現過的版本號**（2026-09-01 查證：所有 log 與
-`codex --version` 都是 `0.144.1`）。那個號碼想必是在另一台機器上讀到的，而筆記沒說是哪台。
-這就是為什麼現在每條事實都要附重驗指令，也是為什麼驗收會 grep 舊版本號 ——
-**寫死的版本號就是會過期的東西，留在文件裡只會讓人拿它當依據。**
-重驗：`codex --version`
-
-### 仍然成立的
+**② 仍然成立的**
 
 - **沒有 `--fresh`**（舊筆記過時）
 - `--commit` / `--uncommitted` / `--base` **都不能配 PROMPT**
 - 額度耗盡 ⇒ `RC=1`，訊息在 log 尾巴
+- **banner 走 stderr，stdout 只有答案** ⇒ 想在腳本裡驗 model/effort 不能用
+  `execFileSync`（只回 stdout），要用 `spawnSync` 取雙串流
+- **不要靠 config，一律在呼叫點明寫 `-m` 與 `-c`** —— config 會漂移（LEDGER F-config 漂移）
 
 ---
 

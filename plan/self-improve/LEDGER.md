@@ -25,19 +25,34 @@
 
 ---
 
-## 1. 已查證的機器事實（2026-09-01 全部重驗過）
+## 1. 已查證的機器事實
 
-| 事實 | 重驗指令 |
+> ⚠️ **每條要標明「哪台機器」。** 2026-09-03 踩到：本表原本寫「本機從未出現過
+> `0.150.0-alpha.7`」，而 owner 的 Mac 上跑出來就是那個版本 —— 那句話不是錯，
+> 是**它只對 WSL 那台成立，而本表沒說是哪台**。沒標機器的機器事實遲早被當普遍事實引用。
+
+**兩台機器的實測值（2026-09-03 各自重驗）：**
+
+| 事實 | WSL（原記錄，2026-09-01） | **Mac（2026-09-03）** | 重驗指令 |
+|---|---|---|---|
+| **F-codex 版本** | `0.144.1` | **`0.150.0-alpha.7`** | `codex --version` |
+| **F-config 值** | `gpt-5.5` / `medium`（已漂離契約） | **`gpt-5.6-sol` / `xhigh`**（當下與契約相符） | `cat ~/.codex/config.toml` |
+
+⇒ **結論不變而且更強**：兩台機器的版本與 config 都不一樣，而且都會各自漂。
+**呼叫點必寫 `-m`；effort 依 target 行數決定**（不要繼承環境，也不要以為某個值是「契約釘死」的）。
+⚠️ `doctor.mjs` 的 `PINNED_EFFORT` 只是 probe 用的固定值，**不是契約釘值**。
+
+| 其餘事實（未標機器者為兩台通用） | 重驗指令 |
 |---|---|
-| **F-codex 版本**：本機 `codex-cli 0.144.1`。契約文件曾宣稱事實驗於 v0.150.0-alpha.7，**本機從未出現過那個版本**——那想必是另一台機器讀到的，而筆記沒說是哪台 | `codex --version` |
-| **F-config 漂移**：`~/.codex/config.toml` 實際是 `gpt-5.5` / `medium`，與契約釘死值不同。**同一台機器一天之內漂過一次**。⇒ 呼叫點必寫 `-m`/`-c`，不要繼承環境 | `cat ~/.codex/config.toml` |
+| **F-config 漂移**：config **會在同一台機器上無訊號地漂**（WSL 實測一天之內從 `xhigh` 漂到 `medium`）。⇒ 呼叫點必寫，不要繼承環境 | `cat ~/.codex/config.toml` |
 | **F-banner 走 stderr**：`codex exec` 的 model/effort banner 在 **stderr**，stdout 只有答案。想在腳本裡驗釘值就不能用 `execFileSync`（只回 stdout），要 `spawnSync` 取雙串流 | `echo ok \| codex -C "$PWD" -s read-only -a never exec -m gpt-5.6-sol - >/dev/null` 看 stderr |
 | **F-prompt 回顯**：codex 會把送進去的 prompt 回顯進 log（0.144.1 實測，log 第 13 行）。**任何建在這個行為上的機制都是未版本化相依** | `grep -n '<你 prompt 的第一句>' <out.log>` |
 | **F-^codex$ 不可靠**：一份正常結束的 2,999 行 log 裡出現 **5 次**，另一份中途結束的只出現 1 次且在推理開頭。⇒ 別用 awk 定位結論，判定交給哨兵區塊 | `grep -c '^codex$' <out.log>` |
 | **F-版本號**：`claude plugin update` **比版本號，不比 commit**。改了 `plugins/` 卻不 bump，使用者會拿到 `already at the latest version`——**語氣是成功的，所以沒人會去查**，而 cache 停在舊 commit | `claude plugin list` 看版本；doctor 看 `plugin_pin` 的 sha |
 | **F-兩個 scope**：`installed_plugins.json` 的結構是 `{version, plugins: {"名稱@marketplace": [...]}}`（**巢狀一層**），同一個 plugin 可能同時有 user 與 project scope，`update` 的 `--scope` **預設只更新 user** | `node .../doctor.mjs` 看 `plugin_pin` |
 | **F-zsh**：`RS="node x.mjs"; $RS --flag` 依賴 shell 對未加引號展開做分詞。**bash 會，zsh 預設不會**，而 macOS 預設 shell 是 zsh。⇒ 一律用 shell function | `zsh -c 'RS="node --version"; $RS'`（本機無 zsh，未實測，見 §6） |
-| **F-過期**：以上每一條都曾經、或可能再度過期。**帶版本號或機器狀態的「實測事實」必須同段附重驗指令**——這是設計原則④ | — |
+| **F-兩台不同版**（2026-09-03）：owner 的 Mac 原本裝的是 **0.1.0（project scope，commit `e7f60e0`，掛在另一個專案）**，而 repo 已到 0.6.0 —— 中間十五個 commit 的硬化在那台上一個都沒有。已改裝 **user scope 0.6.0（`fddae17`）**。⚠️ 那個舊的 project-scope 0.1.0 **仍然存在**，兩份會繼續漂 | `node ~/.claude/plugins/cache/sdd/spec-pipeline/*/scripts/doctor.mjs` 看 `plugin_pin` |
+| **F-過期**：以上每一條都曾經、或可能再度過期。**帶版本號或機器狀態的「實測事實」必須同段附重驗指令，並標明哪台機器**——這是設計原則④ | — |
 
 ---
 
@@ -157,6 +172,25 @@ target**（同 §2 的判準）。**不要**叫它少讀、餵它預擷取的片
 
 重驗：`node --test plugins/spec-pipeline/tests/review-state.test.mjs`（0.6.0 為 57 項）
 
+**M6 — 還沒跑過的東西（2026-09-03 盤點，這是待辦不是量測）**
+
+⚠️ **這套流程的保證被「寫下來」的速度快過被「跑起來」的速度。** 具體：
+
+| 沒跑過的 | 影響 |
+|---|---|
+| F0 在真實執行裡**從未被呼叫過** | 快路判定的實際行為沒有第一手證據 |
+| S5 **從未真跑過**（歷史上 code review 全走 `review` 子命令，那條路現在已刪） | 第二道閘門沒被實際驗證過 |
+| Mac 端**一輪都沒跑過**（`.claude/` 只有 `pipeline.json`，零狀態檔） | 跨機驗收壓在 owner 身上，一直沒兌現 |
+| 所有收斂校準資料都來自審「審查流程自己的規格」 | **自指**。§6c 已指出這是迴圈離題的徵兆 |
+
+⇒ **下一步不是加機制，是在下游專案真跑 3–5 次 F0→S5，每次只記三個數字**：
+① F0 有沒有被呼叫；② S3 各輪 BLOCKER 數、有沒有出現 CLEAR 輪、CLEAR 輪的
+`--prompt-block` 帶了幾項；③ 有沒有「resolve-all 後直接凍結、無複審輪」。
+
+⚠️ **這不是被否決的遙測。** 3–5 行手寫、不彙總、不算趨勢、不做決策門檻。
+它的用途是當「要不要拿掉 resolve-all 路徑 / 要不要刪 `--blockers` / 要不要加 hook」
+這三個待決問題的**否證器** —— 沒有這三個數字，那三題只能靠猜。
+
 **M4 — 審查耗時與 effort（2026-09-01）**
 
 一份 88 行規格的 R1 實測 **13.3 分鐘**；owner 回報幾行文字的 review 也超過 10 分鐘。
@@ -181,7 +215,8 @@ F0 沒跑、或該路徑不在 `allow_globs` 裡。後者是正確的 fail-close
 
 | 缺口 | 為什麼還開著 |
 |---|---|
-| `green_allowed` 仍是自我回報 | 修法方向已定但未實作，見 `design-green-semantics` |
+| `green_allowed` 仍是自我回報 | 修法方向已定但未實作，見 `design-green-semantics`。**0.7.0 補上 C1-6 提示（`green_is_weak_signal`）與 SKILL 的操作規則 —— 兩者都不是閘門**，只是讓弱訊號可見。要不要真的拿掉 resolve-all 路徑，等 §5 M6 的實跑數字 |
+| **v7 三項出貨規格曾經漏實作**（2026-09-03 發現） | C1-6、C5-⑥、C7 都在凍結、六輪審過的 v7 裡，實作時漏掉，**而且沒有任何記載**。⇒ 監督者職責第 2 條（逐條比對規格 vs 實作）在這個 repo 自己身上沒有執行。0.7.0 已補齊三項。⚠️ **沒有記載的放棄與遺漏無法區分** —— 日後刻意不做某項，要在這裡寫一行 |
 | **同一專案、同一 stage 只能有一個 run** | 狀態檔按 stage 分不按任務分。鎖只防**寫壞**（並行寫互相覆蓋），不解決**兩件事共用一個 S3 槽**的邏輯衝突。⇒ **owner 2026-09-01 裁定：不做隔離，維持「一個 session 處理一件事」。** 評估過三個做法都不採用，見 §3 D9 |
 | `--revise` 之後沒有強制複審（G1） | 兩方各試一次而失敗（D7）。誠實記載勝過一道擋不住的閘 |
 | force restart 不強制帶入已知 BLOCKER（G2） | 同上 |

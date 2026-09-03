@@ -11,6 +11,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -612,6 +613,77 @@ describe('⭐⭐ 停止條件是機械的', () => {
         run(dir, '--start', 'S3', '--task', 't');
         run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'q.log', TWO_BLOCKERS));
         assert.match(run(dir, '--prompt-block', 'S3').stdout, /\[FAIL\]/);
+      } finally { cleanup(); }
+    });
+  });
+
+  describe('⭐⭐ C1-6：green_allowed 是弱訊號時要講（提示，不是閘門）', () => {
+    it('最後一輪有 BLOCKER 且全部 resolve → 印弱訊號，但 green_allowed 仍是 true', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'wa.log', TWO_BLOCKERS));
+        run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+        run(dir, '--resolve', 'S3', '--item', 'B2', '--how', 'y');
+        const r = run(dir, '--status', 'S3');
+        assert.equal(r.status, 0, '提示不得改變 exit code');
+        const s = JSON.parse(r.stdout);
+        assert.equal(s.green_allowed, true, '⚠️ 提示不得改變 green_allowed 的值');
+        assert.match(s.green_is_weak_signal, /未經複審輪確認/);
+        assert.match(s.green_is_weak_signal, /不是閘門/);
+      } finally { cleanup(); }
+    });
+
+    it('最後一輪本來就零 BLOCKER → 不印（那不是自我回報，是真的沒事）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log',
+          log(dir, 'wb.log', BLOCK('P1 POLISH 命名')));
+        const s = JSON.parse(run(dir, '--status', 'S3').stdout);
+        assert.equal(s.green_allowed, true);
+        assert.ok(!s.green_is_weak_signal, '零 BLOCKER 的 CLEAR 輪不該被打成弱訊號');
+      } finally { cleanup(); }
+    });
+
+    it('還有未收口的 → 不印（那根本不能 GREEN，不需要弱訊號提示）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'wc.log', TWO_BLOCKERS));
+        run(dir, '--resolve', 'S3', '--item', 'B1', '--how', 'x');
+        const s = JSON.parse(run(dir, '--status', 'S3').stdout);
+        assert.equal(s.green_allowed, false);
+        assert.ok(!s.green_is_weak_signal);
+      } finally { cleanup(); }
+    });
+  });
+
+  describe('⭐ C7：log 的 sha256 與位元組數（純 metadata，不是閘門）', () => {
+    it('log_sha256 與 node crypto 實算一致', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const l = log(dir, 'sha.log', TWO_BLOCKERS);
+        run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+        const want = createHash('sha256').update(readFileSync(l)).digest('hex');
+        const r = state(dir).stages.S3.rounds[0];
+        assert.equal(r.log_sha256, want);
+        assert.equal(r.log_sha256.length, 64, '要完整 64 hex，不是截斷');
+      } finally { cleanup(); }
+    });
+
+    it('非 ASCII 的 log：log_bytes > 字元數（存的是位元組不是字元）', () => {
+      const { dir, cleanup } = sandbox();
+      try {
+        run(dir, '--start', 'S3', '--task', 't');
+        const l = log(dir, 'cjk.log', BLOCK(
+          'B1 BLOCKER 中文檔名.mjs:12 [FAIL] 並行寫入 -> 狀態檔互相覆寫，收口紀錄消失'));
+        run(dir, '--record', 'S3', '--rc', '0', '--log', l);
+        const r = state(dir).stages.S3.rounds[0];
+        assert.equal(r.log_bytes, readFileSync(l).length);
+        assert.ok(r.log_bytes > readFileSync(l, 'utf8').length,
+          '中文 log 的位元組數必須大於字元數，否則存的是字元數');
       } finally { cleanup(); }
     });
   });
