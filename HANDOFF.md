@@ -13,7 +13,7 @@
 
 - 已查證的機器事實（codex 版本、config 漂移、banner 走 stderr、zsh 分詞、
   plugin 更新比版本號不比 commit…）**每條附重驗指令**
-- **死路清單**：八個試過且失敗的設計，附死因。勿復活原形
+- **死路清單**：試過且失敗的設計（D1 起，會繼續增加），附死因。勿復活原形
 - 為什麼 review 會「審不完」的診斷，以及可操作的判準
 - 外部前案（別人怎麼解，附 URL）
 - 量測過的東西（Codex log 有 90% 是檔案傾印、跨輪重複讀取…）別再重算
@@ -58,8 +58,10 @@ plugins/spec-pipeline/
 │   ├── fast-eligibility.mjs             ← F0 機械判定（不呼叫任何模型）
 │   ├── review-state.mjs                 ← 輪數 / 收口 / 跨 session resume
 │   ├── spec-freeze.mjs                  ← 規格凍結 + delta 複審
+│   ├── doctor.mjs                       ← 環境自檢（含各 scope 裝的是哪個 commit）
 │   ├── validate-config.mjs              ← 照 schema 驗 pipeline.json
-│   └── lib/validate-config.mjs          ← 極小 schema 驗證器（零依賴）
+│   ├── lib/validate-config.mjs          ← 極小 schema 驗證器（零依賴）
+│   └── lib/state-lock.mjs               ← 狀態檔的鎖與原子寫入（review-state / spec-freeze 共用）
 ├── schemas/pipeline.schema.json         ← 設定形狀的唯一來源
 └── tests/*.test.mjs                     ← `node --test` 零依賴，數量不寫死
 scripts/validate-plugin.mjs              ← repo 自己的形狀檢查（不會被裝到使用者機器上）
@@ -109,3 +111,6 @@ git config core.hooksPath .githooks
    `deny_globs` 拼錯卻讓 deny 整條靜默失效而**放行**。所以未知鍵一律 `rc=2`
 8. **用免責聲明取代功能，是在騙自己** —— 「不支援 resume 所以不得聲稱收口」
    那句話擋不住任何事，該做的是把狀態存下來
+9. **刪掉一節之後，指向它的文字不會自己消失** —— 2026-09-03 實證：搬走一整節之後
+   兩處「見下方「…」」指向空氣，跟著出貨兩個版本。⇒ `validate-plugin` 第 3b 項守著。
+   **文件裡也不要寫可增長的計數**（「八個死路」那種），寫死的數字就是會過期的東西

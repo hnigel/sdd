@@ -98,6 +98,31 @@ for (const entry of market.plugins) {
     }
   }
 
+  // ── 3b. 文字裡指到的**章節**要真的存在 ──────────────────────────────
+  /**
+   * 第 3 項的同一個形狀，另一種面孔：不是指到不存在的**檔案**，
+   * 是指到自己文件裡不存在的**段落**。
+   *
+   * 2026-09-03 真的發生了：把 codex-review SKILL 的「三條曾經寫錯的事實」整節
+   * 搬去 LEDGER 之後，同一份文件裡兩處「見下方「三條曾經寫錯的事實」」
+   * 就變成指向空氣 —— 而當時的檢查只認 `${CLAUDE_PLUGIN_ROOT}/` 開頭的腳本路徑，
+   * 一個字都沒說。**刪一節比改一節容易，忘記清理指標是必然，不是偶然。**
+   *
+   * 只認**帶「」的**指標：實測全 plugin 只有三處，三處都是真的章節引用，零誤報。
+   * 不帶引號的（「見下方表」「見下方第 6 條」）刻意不管 —— 那些機械上判不了，
+   * 硬要判就會製造雜訊，而雜訊會讓人開始忽略這個檢查。
+   */
+  const SECTION_REF = /[詳參]?見[下上]?[方節]?「([^」]{1,40})」/g;
+  for (const f of walk(dir).filter((f) => f.endsWith('.md'))) {
+    const text = fs.readFileSync(f, 'utf8');
+    const headings = text.split('\n').filter((l) => /^#{1,6}\s/.test(l));
+    for (const m of text.matchAll(SECTION_REF)) {
+      if (!headings.some((h) => h.includes(m[1]))) {
+        bad(`${rel(f)} 指到不存在的章節「${m[1]}」—— 那一節被改名或刪掉了，指標沒跟著清`);
+      }
+    }
+  }
+
   // ── 4. schema 與範例 ────────────────────────────────────────────────
   const schemaPath = path.join(dir, 'schemas', 'pipeline.schema.json');
   if (fs.existsSync(schemaPath)) {

@@ -19,7 +19,7 @@
 | 需要什麼 | 為什麼 | 怎麼確認 |
 |---|---|---|
 | **Codex CLI**，已登入且帳號吃得到 `gpt-5.6-sol` | S3/S5 兩道閘門**全靠它**。沒裝的話會是 `RC=1` → `REVIEW_ERROR`，看起來像 prompt 寫壞，其實是根本沒裝 | 下面那個 smoke test |
-| **Node 18+** | 四支判定腳本 | `node -v` |
+| **Node 18+** | 判定與檢查腳本 | `node -v` |
 | **能切主對話模型** | `/fable` 要 Fable、`/opus` 要 Opus。plugin **不能**替你切，只會停下來請你切 | `/model` |
 
 Codex smoke test（會真的花一次呼叫，約 4k tokens）：
@@ -163,10 +163,12 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/validate-config.mjs"
 |---|---|
 | `/fable` `/opus` | 兩個薄指令，只帶入「這件事該用哪個模型規劃」 |
 | `spec-pipeline` skill | **流程主體**（唯一來源）：F0 快路、S0 分級、S3/S5 兩道 Codex 閘門、輪數與停止條件 |
-| `codex-review` skill | 呼叫 Codex 的**單一來源**：模式選擇、環境釘死、RC 判讀、三條曾經寫錯的事實 |
+| `codex-review` skill | 呼叫 Codex 的**單一來源**：環境釘死、effort 分級、RC 判讀、哨兵格式 |
 | `scripts/fast-eligibility.mjs` | F0 的**機械**判定（不呼叫任何模型） |
 | `scripts/review-state.mjs` | **輪數與收口狀態**。跨 session 可接續，R3 停止條件由它執行 |
 | `scripts/spec-freeze.mjs` | **凍結規格 + delta 複審**。偵測「把規格改成符合實作」 |
+| `scripts/doctor.mjs` | **環境自檢**：node / git / codex / 設定檔 / 各 scope 裝的是哪個 commit |
+| `scripts/validate-config.mjs` | 照 schema 驗 `pipeline.json` |
 | `schemas/pipeline.schema.json` | 設定形狀的**單一來源**：判定腳本與檢查讀同一份 |
 
 ## 每個專案要放 `.claude/pipeline.json`
