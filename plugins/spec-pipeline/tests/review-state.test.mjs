@@ -444,6 +444,40 @@ describe('⭐⭐ 停止條件是機械的', () => {
     } finally { cleanup(); }
   });
 
+  it('引用只認「檔案.副檔名:行號」—— 時間戳／詞:數字／URL 埠號不算', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 't');
+      // 一條 finding 裡塞四種誘餌，只有 a.mjs:12 是真的引用
+      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'cit.log', BLOCK(
+        'B1 BLOCKER a.mjs:12 [FAIL] 在 01:07（見 https://x.com:8080）timeout:30 -> 壞',
+      )));
+      const tj = JSON.parse(run(dir, '--status', 'S3').stdout).trajectory;
+      assert.equal(tj[0].cited, 1,
+        '時間戳 01:07、URL 埠 8080、timeout:30 都不是 檔案:行號，不得計入');
+    } finally { cleanup(); }
+  });
+
+  it('時間戳不得吃掉 divergence_hint（每輪不同的時間戳會讓 new===cited 永遠差一個）', () => {
+    const { dir, cleanup } = sandbox();
+    try {
+      run(dir, '--start', 'S3', '--task', 't');
+      run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'd1.log', BLOCK(
+        'B1 BLOCKER old.mjs:1 [FAIL] a -> b',
+        'B2 BLOCKER old.mjs:2 [FAIL] c -> d',
+      )));
+      run(dir, '--resolve', 'S3', '--item', 'B1', '--how', '加了 new.mjs');
+      run(dir, '--resolve', 'S3', '--item', 'B2', '--how', '加了 new.mjs');
+      // R2 全打新位置，但每條都帶一個當下時間戳
+      const r2 = run(dir, '--record', 'S3', '--rc', '0', '--log', log(dir, 'd2.log', BLOCK(
+        'B1 BLOCKER new.mjs:10 [FAIL] 於 01:07 觸發 -> x',
+        'B2 BLOCKER new.mjs:20 [FAIL] 於 02:18 觸發 -> y',
+      )));
+      assert.ok(JSON.parse(r2.stdout).divergence_hint,
+        '兩個時間戳被誤計成引用的話，new_citations !== cited，提示會被靜默吃掉');
+    } finally { cleanup(); }
+  });
+
   describe('⭐⭐ 發散提示：R2 就講，不必等 R3 的停點', () => {
     // LEDGER §2 的判準：一次修訂讓 findings 沒下降、而且全打在新位置上
     // ⇒ 發散的是**修訂**不是審查。等到 R3 停點才印，那一輪修訂就白做了。

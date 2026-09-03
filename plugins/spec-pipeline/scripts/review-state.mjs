@@ -171,8 +171,24 @@ const stageOf = (s, name) => {
 const lastRound = (st) => st.rounds[st.rounds.length - 1] ?? null;
 const openBlockers = (st) => (lastRound(st)?.blockers ?? []).filter((b) => !b.resolved);
 
-/** 從 finding 文字裡抽出 `檔案:行號` 這種引用。純字串處理，不判斷語意。 */
-const citations = (text) => new Set((text.match(/[\w./@-]+:\d+(?:-\d+)?/g) ?? []));
+/**
+ * 從 finding 文字裡抽出 `檔案:行號` 這種引用。純字串處理，不判斷語意。
+ *
+ * ⚠️ 舊版是 `[\w./@-]+:\d+`，四類東西會被誤當引用（2026-09-03 實測）：
+ *   `01:07`（時間）、`2026-09-03T15:30`（ISO）、`timeout:30`（詞:數字）、
+ *   `https://example.com:8080`（URL 埠號，冒號不在字元類裡所以從 `//` 開始配）。
+ *
+ * 那會污染 `cited` 與 `new_citations`，而 `divergence_hint` 的條件是
+ * `new_citations === cited` —— 多一個每輪都不同的時間戳，就會讓
+ * 「這輪全打新位置」的判定**永遠差一個**，提示因此被靜默吃掉（false negative）。
+ *
+ * ⇒ 收緊成「**名字必須帶副檔名**」：`(路徑/)*名字.ext:行號`。
+ * 前置的 lookbehind 擋掉 URL（`//example.com` 的 `example` 前面是 `/`）。
+ * 代價誠實記：`Makefile:12` 這種**無副檔名**的引用會被漏掉。
+ * 這個方向是安全的 —— 漏算只會少報提示，不會多報。
+ */
+const CITATION = /(?<![\w.@/-])((?:[\w@.-]+\/)*[\w@-]+\.[A-Za-z][\w-]{0,9}:\d+(?:-\d+)?)(?![\w.-])/g;
+const citations = (text) => new Set([...text.matchAll(CITATION)].map((m) => m[1]));
 
 /**
  * 每輪的「新引用」數 —— 這一輪的 findings 指向的位置，有幾個是先前各輪都沒指過的。

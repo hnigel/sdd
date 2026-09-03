@@ -30,6 +30,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { validate } from './lib/validate-config.mjs';
+import { atomicWrite } from './lib/state-lock.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCHEMA = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'schemas', 'pipeline.schema.json'), 'utf8'));
@@ -142,7 +143,15 @@ function check(paths) {
     dirty_at_entry: dirtyAtEntry,
   };
   const out = path.join(ROOT, '.claude', 'fast-baseline.json');
-  fs.writeFileSync(out, JSON.stringify(baseline, null, 2));
+  // 跟另外兩支狀態檔一樣走 atomicWrite（先寫暫存再 rename）。
+  // baseline 不在並行寫入路徑上，但「三個狀態檔兩種寫法」本身就是會咬人的不一致：
+  // 寫到一半被中斷會留下半份 JSON，而 --verify-scope 讀它時只會噴解析錯誤。
+  //
+  // ⚠️ **這一行沒有負控組，是刻意記下來的。** 兩種寫法在可達路徑上行為相同 ——
+  //    `atomicWrite` 多做的 `mkdirSync` 觀察不到（`.claude/` 一定存在，`pipeline.json`
+  //    就在裡面），而「寫到一半被砍」要模擬行程被殺才測得出來。
+  //    改它是為了消除不一致與崩潰時的半份檔，不是為了修一個測得出來的 bug。
+  atomicWrite(out, JSON.stringify(baseline, null, 2));
   console.log(JSON.stringify({ verdict: 'fast', baseline: '.claude/fast-baseline.json', head, paths }, null, 2));
   process.exit(0);
 }

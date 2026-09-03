@@ -11,7 +11,7 @@
     {
       "name": "spec-pipeline",
       "description": "F0 快路判定（機械式）+ /fable /opus 主流程 + codex-review 呼叫契約。跨專案，靠 .claude/pipeline.json 吸收專案差異。",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "author": {
         "name": "hnigel"
       },

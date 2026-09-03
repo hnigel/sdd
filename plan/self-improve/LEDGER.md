@@ -223,6 +223,7 @@ F0 沒跑、或該路徑不在 `allow_globs` 裡。後者是正確的 fail-close
 | 審查期間 target 被改動無機械偵測（G3） | 同上（D6） |
 | **zsh 行為未在本機實測** | 這台是 WSL，沒有 zsh。依據是 zsh 文件化語意 + 一次真實 macOS run 的筆記。**Mac 端驗收壓在 owner 身上** |
 | Mac 完整 S0→S5 流程未驗收 | 同上 |
+| **`fast-eligibility.mjs` 的 `atomicWrite` 沒有負控組**（0.7.1） | 兩種寫法在可達路徑上行為相同：`mkdirSync` 觀察不到（`.claude/` 一定存在），「寫到一半被砍」要模擬行程被殺。**改它是為了消除不一致，不是修一個測得出來的 bug** —— 照實記，不要假裝它被守著 |
 
 ---
 
