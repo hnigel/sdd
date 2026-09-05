@@ -27,6 +27,10 @@
 
 ## 1. 已查證的機器事實
 
+> ⚠️ **兩天就過期一次。** 09-03 記 Mac 是 `0.150.0-alpha.7`，09-05 再跑就是 `0.153.4`。
+> 這條事實**有日期標籤、有機器標籤，還是過期了** —— 標籤讓它可稽核，不會讓它不過期。
+> ⇒ 引用前一定要跑重驗指令，不要因為「上面寫了日期」就當它還成立。
+>
 > ⚠️ **每條要標明「哪台機器」。** 2026-09-03 踩到：本表原本寫「本機從未出現過
 > `0.150.0-alpha.7`」，而 owner 的 Mac 上跑出來就是那個版本 —— 那句話不是錯，
 > 是**它只對 WSL 那台成立，而本表沒說是哪台**。沒標機器的機器事實遲早被當普遍事實引用。
@@ -35,7 +39,7 @@
 
 | 事實 | WSL（原記錄，2026-09-01） | **Mac（2026-09-03）** | 重驗指令 |
 |---|---|---|---|
-| **F-codex 版本** | `0.144.1` | **`0.150.0-alpha.7`** | `codex --version` |
+| **F-codex 版本** | `0.144.1` | 09-03：`0.150.0-alpha.7`<br>**09-05：`0.153.4`** | `codex --version` |
 | **F-config 值** | `gpt-5.5` / `medium`（已漂離契約） | **`gpt-5.6-sol` / `xhigh`**（當下與契約相符） | `cat ~/.codex/config.toml` |
 
 ⇒ **結論不變而且更強**：兩台機器的版本與 config 都不一樣，而且都會各自漂。
@@ -172,6 +176,27 @@ target**（同 §2 的判準）。**不要**叫它少讀、餵它預擷取的片
 
 重驗：`node --test plugins/spec-pipeline/tests/review-state.test.mjs`（0.6.0 為 57 項）
 
+**M8 — `codex exec -o` 把最終答案隔離出來（2026-09-05，實測）**
+
+同一次 review，同時看 `out.log` 與 `-o` 寫出的 `final.txt`：
+
+| | `out.log` | `final.txt` |
+|---|---|---|
+| 行數 | 3,336 | 122 |
+| `nl -ba` 檔案傾印 | 2,587 行（77.6%） | **0** |
+| `<<<FINDINGS>>>` 出現次數 | **6** | **1** |
+
+那 6 次正是 `findingsBlock()` 要「取**最後一個**區塊」這個 heuristic 存在的理由
+（Codex 會把含該格式的檔案倒進 log）。**用 `-o` 之後那整類問題消失。**
+
+⇒ 這是「雙模型整合草案」P1 核心主張的直接證據：**答案來源應該是獨立 final 檔，
+不是整份逐字稿。** 形狀是減法（拿掉一個 heuristic），不是加法。
+
+⚠️ **能力要當天偵測，不要當成穩定前提。** 本機 `codex-cli 0.153.4` 有
+`-o` / `--output-last-message`、`--output-schema`、`--json`（`codex exec --help` 實測），
+但同一台機器的版本兩天內漂過一次（見 §1）。
+重驗：`codex exec --help | grep -E 'output-last-message|output-schema'`
+
 **M7 — 「散文描述結構」是這個 repo 沒被守住的那一類漂移（2026-09-03）**
 
 `validate-plugin.mjs` 開頭列的三個歷史事故裡，有兩個是「文字指向一個不存在的東西」。
@@ -260,6 +285,57 @@ F0 沒跑、或該路徑不在 `allow_globs` 裡。後者是正確的 fail-close
 
 ---
 
+## 9. 雙模型整合草案的 S3 R1（2026-09-05）
+
+target：`design-dual-llm-integration-2026-09-05.md`（464 行）。基準 `2be9d17`。
+`xhigh`、`rc=0`、`-o` 取 final。**R1 八條 BLOCKER、五條 POLISH，`NEEDS_FIX`。**
+Codex 的結論：**不應進入 P1 實作。**
+
+⚠️ **狀態檔會被下一次 `--start` 覆蓋且不進版控 ⇒ 八條記在這裡才留得住。**
+
+| # | 一句話 | 抽驗 |
+|---|---|---|
+| B1 | **`spec-delta` 復活死路 D4** —— `--delta` 只取 `revisions[length-1]`，連續 revise 兩次未複審，第一次的修改就從素材裡消失 | ✅ 已重跑 `spec-freeze.mjs:204` 確認只取最後一筆 |
+| B2 | 已零 BLOCKER 收口的 stage 合法 revise 後，`STAGE_ALREADY_CLEAR` 會在呼叫模型前擋死 ⇒ C1「一個指令」在這個合法狀態下做不到 | 未抽驗 |
+| B3 | **G4 只關掉一段。** 舊 `--record` 寫進的無 provenance CLEAR 輪，升級後仍被信任並讓 runner 拒絕新審查 | 未抽驗 |
+| B4 | P1 排在 P2 前，反轉 M6；且一次動六層 ⇒ 拿到的資料量不到原流程的缺口 | 未抽驗（與監督者判斷一致） |
+| B5 | **鎖的壽命衝突**：`STALE_MS` 是 10 分鐘，草案 `timeout_ms` 預設 20、上限 60 ⇒ 正常 run 會被標「疑似殘留」；人工刪除後舊 holder 還會按路徑刪掉新 holder 的鎖 | ✅ 已重跑 `state-lock.mjs:21` 與草案 `:148` 確認 |
+| B6 | 四個 RC 各自承載多種語意（RC=0 含有／無 BLOCKER；RC=2 含 request 錯、鎖忙、已 CLEAR、付費後格式錯…）⇒ C8 只剩「記得讀 JSON」的紀律 | 未抽驗 |
+| B7 | W5 只要求「預設路徑只有 runner」，沒界定薄化邊界 ⇒ F0、S0、監督者六責任、GREEN 條件可被刪掉而驗收照過 | 未抽驗 |
+| B8 | S5 收集未追蹤檔會**跟隨 symlink** ⇒ repo 外的祕密被組進 prompt。越界檢查只寫在 `spec_path`，沒套到收集項 | 未抽驗 |
+
+⚠️ **只抽驗了兩條（B1、B5），兩條都成立。** 其餘六條未獨立覆核 —— 異廠商不等於免驗。
+
+### 監督者自己的判斷 vs 審查者：**最有信心的那條是錯的**
+
+監督者審前寫過：「最有價值的部分是它**結構性關掉 G4**。」
+
+**B3 推翻了這句。** 用 §5 的框架講：runner 確實消除了「主模型搬運 RC 與 final」那個
+proposition，但 legacy 輪次、target 綁定、mixed state 仍信任同一個 principal。
+⇒ **G4 對全流程沒關掉，只對「新 runner invocation 的 process → final 檔」這一段關掉。**
+
+其餘對照：
+
+| 監督者說的 | 審查者 | 差距 |
+|---|---|---|
+| 順序反轉 M6、一次動太多層 | B4 | **一致**（兩份互不知情） |
+| async 鎖風險最高 | B5 | 方向對，但**沒找到** `process.exit()` 的具體路徑，也沒發現 10 分鐘 vs 20 分鐘 |
+| exit code 表脆 | B6 | 只指出 RC=20，審查者列出**四個** RC |
+| 「紀律面守得很好，明寫遵守 D1–D9」 | B1 | **錯**。D4 被復活了，而草案自己宣稱遵守 |
+| 建議砍範圍 | B4 | 一致 |
+| —— | B2 / B3 / B7 / B8 | **四條完全沒想到** |
+
+⇒ **這一輪的價值不在「多找到幾條」，在於它推翻了監督者最有信心的那一條。**
+一份自審會保留那句「結構性關掉 G4」，而那句話會讓 P1 帶著錯誤的理由出貨。
+（樣本數 1，**不據此宣稱異廠商審查的一般效益** —— 那是被否決的 ROI 實驗。）
+
+### 下一步不是送 R2
+
+八條裡有多條在講「範圍太大、時機太早」。依 §2 的判準，findings 集中在這個形狀時
+**該拆該減，不是再審一輪**。R2 只會審到砍完之後的新版本。
+
+---
+
 ## 7. 寫進這份文件的規矩
 
 1. **每條事實附重驗指令。** 沒有重驗指令的事實會過期而且沒有訊號。
@@ -267,3 +343,12 @@ F0 沒跑、或該路徑不在 `allow_globs` 裡。後者是正確的 fail-close
 3. **外部前案要附 URL，並標明是否逐字覆核過。**
 4. **量測要附方法**，否則下次得重算。
 5. **查完新東西回來寫這裡**，不要只寫在 commit message 裡——commit message 沒有人會回頭翻。
+
+## 8. 雙模型整合盤點（2026-09-05，Mac）
+
+- 本次 `codex --version` 為 `codex-cli 0.153.4`；`codex exec --help` 列出 `--output-schema`、`--output-last-message`（`-o`）與 `--json`。重驗：上述兩個指令。這只驗到 CLI 介面，沒有執行付費模型呼叫或完整 S3/S5。
+- 已開啟核對 [Codex non-interactive 官方文件](https://learn.chatgpt.com/docs/non-interactive-mode)：`-o` 將最後訊息獨立寫檔，`--output-schema` 約束最終回應的 JSON 形狀，`--json` 則是執行事件 JSONL。三者用途不同；結構化輸出不能證明審查內容正確。重驗：開啟該文件的 Make output machine-readable / Create structured outputs with a schema。
+- 已開啟核對 [Claude Code programmatic 官方文件](https://code.claude.com/docs/en/headless)：`claude -p` 支援非互動呼叫，`--output-format json` 搭配 `--json-schema` 可取得結構化結果。這提供未來雙向 adapter 的介面依據，尚未在本機驗收。重驗：開啟該文件的 Basic usage / Get structured output。
+- 本次既有測試通過 105 項，形狀檢查通過。重驗：`node --test plugins/spec-pipeline/tests/*.test.mjs` 與 `node scripts/validate-plugin.mjs`。這不更新 §5 M6 的下游完整流程驗收狀態。
+- 候選方向（未實作、未定案）：先以單一 runner 收攏 prompt 組裝、CLI 呼叫、RC 與結果入帳；先採 `-o` 分離最終答案，再評估 JSON schema 遷移。保留目前單任務與人工裁決邊界，不據此復活 D3–D9，也不把模型 verdict 當成品質證明。
+- 使用者要求完整規劃後，已寫成 [雙模型整合設計草案](design-dual-llm-integration-2026-09-05.md)：P1 runner、P2 下游驗收、P3 JSON findings、P4 雙向入口；包含介面、錯誤／恢復、相容性與驗收矩陣。狀態是未實作、未獨立審查、未凍結；不代表 GREEN 語意或 D9 的既有裁定已變更。重驗：讀取該文件的狀態與階段表。
