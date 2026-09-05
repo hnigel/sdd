@@ -225,7 +225,7 @@ effort：
 
 `spec`：runner 讀取指定文件原文並放入 prompt，標明相對路徑，允許審查者查證所引用的原始碼與外部文件。
 
-`spec-delta`：要求有已凍結規格、存在最近一次 revision，且當前規格內容與 freeze 狀態一致；讀取完整當前規格與最近 delta。prompt 指定審查重點是 delta 及其對既有條件的影響，完整規格供查證。不得把「傳了 revision 號／hash」視為已複審。
+`spec-delta`：要求有已凍結規格、**存在至少一筆未複審的 revision**，且當前規格內容與 freeze 狀態一致；讀取完整當前規格與**凍結以來的全部 delta**（不是最近一筆 —— 見 §5.2，`spec-freeze.mjs` 的 `showDelta()` 已於 0.8.0 改為全送）。prompt 指定審查重點是這些 delta 及其對既有條件的影響，完整規格供查證。不得把「傳了 revision 號／hash」視為已複審。
 
 ### 6.2 S5
 
@@ -298,7 +298,13 @@ G4 對全流程仍然開著 —— 舊 CLI 還能繞過 runner 寫入無 provena
 1. 驗 request、pipeline.json、cwd/git、必要 CLI 能力與 target 前提。能力檢查使用 help，不做付費 smoke test。
 2. 取得既有 `review-state.json.lock`，在鎖內重讀 stage 與前提。拿不到立即 RC=2，不排隊或搶鎖。
 3. stage 不存在時在記憶體建立指定 task；存在則核對 task，禁止自動 force/reset。到有效輪數上限 3，或 invocation_failures 已超過 2 時，呼叫前回 STOP。
-4. 已有最後一輪零 BLOCKER 時不自動再審；回 RC=2／`STAGE_ALREADY_CLEAR`，交由現有明示重開流程處理，避免浪費剩餘輪次。此為 runner 入場規則，舊 CLI 語意不變。
+4. **依 §6.4 的順序**判斷要不要拒絕（不是無條件看「最後一輪零 BLOCKER」）：
+   **(a)** 有未複審的 revision ⇒ **一律放行**（`kind` 必須是 `spec-delta`），不看最後一輪；
+   **(b)** 沒有未審 revision、最後一輪零 BLOCKER、**且那一輪帶 `execution.answer_source = "final-file"`**
+   ⇒ RC=2／`STAGE_ALREADY_CLEAR`；
+   **(c)** 沒有未審 revision、最後一輪零 BLOCKER、但**不帶 provenance**（舊 `--record` 寫入的）
+   ⇒ **當成需要審查，正常呼叫模型**，不得替它背書。
+   此為 runner 入場規則，舊 CLI 語意不變。
 5. 建立唯一暫存目錄，生成 prompt 與 execution metadata，取得 effort；複審有尚未標記處理的項目可以執行，但 prompt 明列尚未處理。
 6. 啟動 Codex，stdin 傳 prompt 後關閉；等待退出與輸出串流關閉。
 7. 先判斷 exit status／signal，再讀 `final.txt`；依規則解析與入帳，原子寫入 review-state。
@@ -572,4 +578,13 @@ MCP、SDK、共享長對話、原生 Windows 及同專案多任務並行都不�
 | 格式錯誤目前不占失敗預算 | 相容保留且不自動 retry；是否統一另案 |
 | state commit 與輸出不是同一交易 | 以 state＋attempt metadata 查明；不宣稱 exactly-once |
 
-下一步是依 W1–W6 實作 P1，先跑 mock 與相容測試，再完成真實下游驗收。實作時任何新增機制都必須對應本文件的成功條件或具體失敗案例；沒有對應的擴張先移出本次範圍。
+**下一步是 P0，不是 W1–W6。** 先用現有版本在下游跑 3–5 件真任務、記三個數字（見階段表與 §13）；
+**P0 沒有做完之前不要開始 P1 的實作**。理由見階段表底下那兩段（LEDGER M6：先有原流程基線，
+才分得出失敗來自既有流程還是新元件）。
+
+P0 完成後才依 W1–W6 實作 P1，而 **W1–W6 與 §12 驗收矩陣尚未依砍過的 P1 範圍重寫** ——
+它們現在仍描述七件事的版本。實作前必須先把兩者縮到砍後的範圍
+（P1 只做 runner 自己 spawn ＋ 讀 `-o` final ＋ 入帳；驗收只留 T01–T05、T07、T12），
+否則執行者照著 W1–W6 做就會把移出的項目又做回來。
+
+實作時任何新增機制都必須對應本文件的成功條件或具體失敗案例；沒有對應的擴張先移出本次範圍。

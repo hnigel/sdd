@@ -73,6 +73,18 @@ export function withLock(stateFile, fn, onBusy) {
    *   而不是刪掉別人的（fail-open，兩個人同時寫）。
    *
    * ⚠️ 這依賴 inode 有意義（macOS / Linux / WSL 成立）。
+   *
+   * ⚠️ **殘留競態，沒有關掉，不要以為關掉了**（2026-09-05 S3 R2 的 B5）：
+   * `statSync` 與 `unlinkSync` 是兩個 syscall。若人工刪除＋B 重建**剛好落在這兩者之間**，
+   * 我們仍會刪掉 B 的鎖。**POSIX 沒有原子的「比對 inode 後刪除」**，
+   * 零依賴（不引 flock 綁定）做不到真正關閉。
+   *
+   * 這個檢查做到的是把窗口從「人工刪除之後的整段時間」縮到「兩個 syscall 之間」，
+   * 那是量的改善不是質的改善。
+   *
+   * ⇒ **根治不在這裡**：真正該做的是讓 `STALE_MS` 大於持鎖者的預期執行時間，
+   * 人就不會被提示去刪一把還活著的鎖（見設計文件 §5.2，列為 P1 實作前必須先決定的事）。
+   * 現在 `STALE_MS` 是 10 分鐘，而一次 xhigh review 動輒十幾分鐘 —— **那才是成因**。
    */
   const release = () => {
     let mine = false;

@@ -135,12 +135,22 @@ for (const entry of market.plugins) {
    * ⇒ 現在就把它釘住，不等那一天。這只驗**標題還在**，不判斷內容好壞 ——
    * 判斷品質就回到散文了。要改標題就要同時改這裡，那正是我們要的訊號。
    */
+  /**
+   * ⚠️ **只驗「關鍵字還在」不夠**（2026-09-05 S3 R2 指出）：
+   * 薄化時把標題留著、正文刪光，一樣通過 —— 那正是這道守衛要擋的事。
+   * ⇒ 每一項再加一個 `body`：那段**底下**必須還有幾行實質內容。
+   * 純行數，不判斷內容好壞（判品質就回到散文了）。
+   */
   const LOAD_BEARING = {
     'skills/spec-pipeline/SKILL.md': [
-      { need: /^#+.*F0/m, what: 'F0 快路判定（fail-closed 的入口）' },
-      { need: /^#+.*S0 triage/m, what: 'S0 分級' },
-      { need: /規劃者 = 監督者/, what: '監督者六責任' },
-      { need: /^#+.*GREEN 的必要條件/m, what: 'GREEN 的必要條件' },
+      { need: /^#+.*F0/m, what: 'F0 快路判定（fail-closed 的入口）', body: 12 },
+      { need: /^#+.*S0 triage/m, what: 'S0 分級', body: 10 },
+      { need: /^#+.*規劃者 = 監督者/m, what: '監督者六責任', body: 15 },
+      { need: /^#+.*GREEN 的必要條件/m, what: 'GREEN 的必要條件', body: 3 },
+      { need: /^#+.*S4 實作/m, what: 'S4 之後的 scope 重驗（--verify-scope）', body: 6 },
+      { need: /^#+.*S5 Codex 審程式碼/m, what: 'S5：verify_cmd 與 spec-freeze --check 的操作契約', body: 6 },
+      { need: /spec-freeze\.mjs.*--freeze|--freeze.*spec-freeze\.mjs/, what: '凍結規格的呼叫' },
+      { need: /verify_cmd/, what: 'verify_cmd 的角色' },
     ],
     'skills/codex-review/SKILL.md': [
       { need: /<<<FINDINGS>>>/, what: '哨兵區塊契約' },
@@ -151,10 +161,27 @@ for (const entry of market.plugins) {
     const f = path.join(dir, relPath);
     if (!fs.existsSync(f)) { bad(`承重檔案不見了：${relPath}`); continue; }
     const text = fs.readFileSync(f, 'utf8');
-    for (const { need, what } of needles) {
-      if (!need.test(text)) {
+    const lines = text.split('\n');
+    for (const { need, what, body } of needles) {
+      const m = need.exec(text);
+      if (!m) {
         bad(`${relPath} 少了承重段落「${what}」—— 它沒有別的來源，刪掉不會有任何測試變紅。`
           + '\n    真的要移除或改名，請同時改 validate-plugin 的 LOAD_BEARING，讓下一個人看得到這個決定。');
+        continue;
+      }
+      if (!body) continue;
+      // 從命中的那一行往下數，到下一個同級或更高級標題為止，有幾行實質內容
+      const at = text.slice(0, m.index).split('\n').length - 1;
+      const level = (/^(#+)/.exec(lines[at]) ?? [, '###'])[1].length;
+      let n = 0;
+      for (let i = at + 1; i < lines.length; i++) {
+        const h = /^(#+)\s/.exec(lines[i]);
+        if (h && h[1].length <= level) break;
+        if (lines[i].trim()) n++;
+      }
+      if (n < body) {
+        bad(`${relPath} 的承重段落「${what}」只剩 ${n} 行實質內容（至少要 ${body}）——`
+          + '\n    標題留著、正文被掏空，跟刪掉是一樣的效果。');
       }
     }
   }
