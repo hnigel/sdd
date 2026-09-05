@@ -12,12 +12,46 @@
 
 | 階段 | 交付 | 完成後能做什麼 |
 |---|---|---|
-| P1 | Codex review runner、最終答案檔、共用審查核心 | Claude 用一個指令執行並記錄一輪 S3 或 S5 |
-| P2 | 下游實際驗收、修正 P1 使用問題 | 確認真實任務能跑通，保留簡短操作證據 |
+| **P0** | **用現有 0.8.0 在下游跑 3–5 件真任務**，每件記三個數字 | 拿到原流程的基線，知道哪些問題是真的 |
+| P1 | **只做一件事**：runner 自己 spawn Codex、用 `-o` 取 final、入帳 | 主模型不再能遞交自取的 RC 與答案路徑 |
+| P2 | 用 P1 再跑下游，修 P1 的使用問題 | 確認新路徑沒有比舊路徑差 |
 | P3 | 結構化 findings，獨立版本發布 | 用 JSON Schema 交接 findings，保留舊狀態讀取 |
 | P4 | Claude adapter 與 Codex 薄入口 | 支援 Claude→Codex、Codex→Claude 兩種方向 |
 
-P1 是下一個可實作範圍；P3、P4 是有進場條件的後續規劃，不隨 P1 自動出貨。GREEN 語意、規格修訂強制複審、全面流程編排另案處理。
+### ⚠️ P0 是新加的，而且它擋在 P1 前面（2026-09-05，S3 R1 的 B4）
+
+原本的順序是「先蓋 runner，再下游驗收」。那**反轉了 LEDGER M6**：
+M6 明寫「下一步不是加機制，是先真跑 3–5 次」，而 F0 從未被真實呼叫、
+S5 從未真跑、Mac 一輪都沒跑過。
+
+先蓋 runner 再跑，拿到的是**新舊混合系統**的資料 ——
+失敗來自既有流程還是新 core／lock／collector／adapter／入口，分不出來。
+⇒ **P0 先跑，拿到原流程基線；P1 才有東西可以對照。**
+
+### ⚠️ P1 已砍到只剩一件事（同上，B4 的第二半）
+
+原本 P1 同時做：抽 core、改 async 鎖、造 target collector、造 request schema、
+造 adapter、改 state metadata、切兩份 skill —— 七件事，違反「一次只動一層」，
+也重演 §2 記載的元失敗形狀（下一輪 findings 全打在剛加的機制上）。
+
+**現在 P1 只保留唯一有已驗證缺陷支撐的那一件**：
+`--rc` 與 `--log` 是呼叫端遞交的**語意主張**（G4），runner 自己跑、自己讀 `-o` 的
+final 檔，把它變成**既成事實的搬運**。
+
+移出 P1 的（各自等自己的進場條件）：
+
+| 移出 | 為什麼不在 P1 | 進場條件 |
+|---|---|---|
+| 抽 `review-core` / `review-policy` | 是為了 P3/P4 鋪路，不解決任何已驗證缺陷 | P3 確定要做 |
+| async 鎖改造 | 只有「持鎖跨模型呼叫」才需要；且 `STALE_MS` 衝突未決（B5） | 先決定持鎖策略 |
+| target collector（S5 worktree 蒐集） | 新表面最大的一塊，且帶 symlink 風險（B8） | P0 顯示手工組 target 真的出過問題 |
+| request schema | 沒有 collector 就沒有那麼多欄位要驗 | 同上 |
+| 切薄兩份 skill | 會動到承載 F0／S0／監督者責任／GREEN 的唯一來源（B7） | P2 之後，且有機械保護 |
+
+⇒ **P1 的驗收矩陣只保留 T01–T05、T07、T12 這幾格**；
+T06、T08–T11、T13–T18 隨對應項目移到後續階段。
+
+P3、P4 是有進場條件的後續規劃，不隨 P1 自動出貨。GREEN 語意、規格修訂強制複審、全面流程編排另案處理。
 
 ## 2. 現況與證據
 
@@ -224,6 +258,41 @@ R2+：使用 review-core 產生的前輪 findings 與處理說明；只核對未
 
 保留原始碼自主查證能力；不把「少讀檔」當效能目標。目標內容明確標記為待審資料，資料內的命令或「忽略規則」不構成 runner 指令。這不是 prompt injection 完整防護的承諾。
 
+## 6.4 入場規則：什麼時候可以拒絕呼叫模型（B2 / B3）
+
+runner 在呼叫模型前會擋掉一些情況。**擋錯方向會比不擋更糟** —— 它會讓一個
+未經審查的狀態看起來像已經通過。兩條修正：
+
+### `STAGE_ALREADY_CLEAR` 不得擋掉合法的 `spec-delta`（B2）
+
+`--revise` 的定義就是「對**已經通過 S3** 的規格做修改」。所以
+「最後一輪零 BLOCKER」與「有未複審的修訂」**同時成立是正常狀態**，不是矛盾。
+
+⇒ 判斷順序固定為：
+
+1. `spec-freeze` 有沒有**未經複審的修訂**？有 ⇒ **一律放行**，`kind` 必須是 `spec-delta`。
+2. 沒有未審修訂，且最後一輪零 BLOCKER ⇒ `STAGE_ALREADY_CLEAR`，RC=2，不呼叫模型。
+
+⚠️ 舊寫法無條件先看「最後一輪是不是零 BLOCKER」，於是
+**freeze → revise → 呼叫 runner** 這條完全合法的路會在第 3 步被擋死，
+C1（一個指令跑完一輪）在這個狀態下做不到，而 G1 那條「便宜的誠實路徑」實際不可用。
+
+### `STAGE_ALREADY_CLEAR` 只能相信帶 provenance 的那一輪（B3）
+
+舊 `--record` 記進來的輪次**沒有 provenance** —— 它的 `--rc` 與 `--log` 是呼叫端
+遞交的語意主張（G4）。如果最後一輪是那種，runner 卻據以回 `STAGE_ALREADY_CLEAR`
+並拒絕新審查，**那筆無來歷的 CLEAR 就被新元件背書了**。
+
+⇒ `STAGE_ALREADY_CLEAR` 的前提是**最後一輪帶 `execution.answer_source = "final-file"`**。
+不帶的一律當成「需要審查」，正常呼叫模型。
+
+⚠️ **誠實記載**：這只讓 runner 不再替舊輪次背書，**不等於 G4 被關掉**。
+G4 對全流程仍然開著 —— 舊 CLI 還能繞過 runner 寫入無 provenance 的輪次，
+而 request 提供的 target 是否真屬於這一 run，runner 也證明不了
+（沒有 target digest／base SHA 綁定）。§16 已列。
+
+---
+
 ## 7. Runner 執行流程與狀態
 
 1. 驗 request、pipeline.json、cwd/git、必要 CLI 能力與 target 前提。能力檢查使用 help，不做付費 smoke test。
@@ -315,14 +384,27 @@ stdout/stderr 直接串流到檔案，不使用小型 maxBuffer 或整份保留�
 
 ### 9.2 Exit code
 
+⚠️ **`RC=0` 只代表一件事：這一輪有效入帳、而且沒有待處理事項。**
+有 BLOCKER 走 `RC=3`。這樣 `if rc == 0: 往下走` 這種**最天真的消費方式也是對的**（B6）。
+
+舊表把「零 BLOCKER」與「有 BLOCKER」都放進 RC=0，只在文字裡要求呼叫者去讀 JSON。
+但兩份 SKILL 的操作骨架就是 RC 表 —— 一個只看 exit code 的呼叫者會把
+「有八條 BLOCKER 的有效輪」當成通過並進入下一階段。**C8 不能靠紀律守。**
+
 | RC | 狀態 | 有效輪次／失敗預算 |
 |---|---|---|
-| 0 | 有效審查已入帳，可有 BLOCKER | 有效輪 +1；呼叫者必須讀結果 |
+| 0 | 有效審查已入帳，**且零 BLOCKER**（`RETURN_TO_PIPELINE`） | 有效輪 +1。**這是唯一可以直接往下走的碼** |
+| **3** | **有效審查已入帳，但有 BLOCKER**（`FIX_AND_REREVIEW`） | 有效輪 +1；必須修完再複審。**不是錯誤，是待辦** |
 | 2 | request/能力/鎖/格式錯誤、task 不符、已 CLEAR | 前置錯誤不改 state；格式錯誤維持既有 parser 語意，不加有效輪與失敗數 |
 | 10 | 缺 pipeline 設定、缺必要 freeze/delta | 不呼叫模型、不入帳 |
 | 20 | 輪次上限、失敗預算用盡、spec drift | 前置拒絕不改 state；若本次是第三個失敗或有 BLOCKER 的 R3，按既有 core 入帳後停止 |
 | 21 | 非零退出、空/缺 final、缺哨兵、逾時或可處理的取消 | 不加有效輪；已啟動模型的失敗記一次 invocation failure |
 | 1 | 非預期 I/O 或入帳基礎設施錯誤 | 不宣稱完成；用 recorded 欄位與 state 核對是否已提交 |
+
+⚠️ **每個 RC 只能對應一組 `(status, recorded, next_action)`，而且驗收矩陣要逐列一格。**
+不能像舊表那樣讓 RC=2 同時是「request 寫錯」「鎖被占用」「已 CLEAR」「付費呼叫後格式錯」——
+前三者沒花錢、第四者花了，呼叫者的正確反應不同。⇒ 這四種各自給 `reason`，
+且**只有花過錢的那種才記 invocation failure**。
 
 沿用現有計數：最初一次失敗加上最多兩次重試，第三次失敗回 20。runner 不允許第四次呼叫；不使用既有 `--status` 的 `invocation_retry` 顯示字串推算，直接讀 core 狀態。原 CLI 在第三次失敗後的歷史行為不隨 P1 暗改。
 
@@ -375,7 +457,8 @@ S3：主對話寫規格 → runner → 處理 findings → runner 複審 → 主
 | ID | 案例 | 預期 |
 |---|---|---|
 | T01 | RC=0、final 有合法零 BLOCKER 區塊 | 一輪入帳，RC=0，RETURN_TO_PIPELINE，沒有 GREEN |
-| T02 | RC=0、final 有 BLOCKER | 正確入帳／計數，前兩輪 RC=0，主對話收到修正動作 |
+| T02 | final 有 BLOCKER | **RC=3**（不是 0）、`FIX_AND_REREVIEW`、正確入帳／計數；只看 exit code 的呼叫者不會誤判為通過 |
+| T02b | `(rc, status, recorded, next_action)` 每一組合 | 逐列一格；RC=0 只在零 BLOCKER 出現 |
 | T03 | stdout/stderr 含合法 CLEAR，final 缺失／空白 | RC=21，不能記為清空輪 |
 | T04 | Codex 非零／signal，但 final 留有完整 CLEAR | 仍為失敗，不增加有效輪 |
 | T05 | final 缺哨兵／哨兵格式錯誤 | 分別 RC=21／2，沿用舊計數政策 |

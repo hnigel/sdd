@@ -123,6 +123,42 @@ for (const entry of market.plugins) {
     }
   }
 
+  // ── 3c. 承重段落不得消失 ────────────────────────────────────────────
+  /**
+   * `spec-pipeline/SKILL.md` 是**唯一**承載這幾件事的地方：F0 fail-closed、S0 分級、
+   * 監督者六責任、GREEN 的必要條件。它們不在任何腳本裡，刪掉不會有任何測試變紅。
+   *
+   * 2026-09-05 的異廠商審查（S3 R1 的 B7）指出：規劃中的「把 skill 切薄成 runner 入口」
+   * 只要求「使用者預設路徑只有 runner」，沒有界定薄化邊界 ⇒
+   * **FULL 任務可能不再收到這四件事，而引用檢查與版本檢查照樣通過。**
+   *
+   * ⇒ 現在就把它釘住，不等那一天。這只驗**標題還在**，不判斷內容好壞 ——
+   * 判斷品質就回到散文了。要改標題就要同時改這裡，那正是我們要的訊號。
+   */
+  const LOAD_BEARING = {
+    'skills/spec-pipeline/SKILL.md': [
+      { need: /^#+.*F0/m, what: 'F0 快路判定（fail-closed 的入口）' },
+      { need: /^#+.*S0 triage/m, what: 'S0 分級' },
+      { need: /規劃者 = 監督者/, what: '監督者六責任' },
+      { need: /^#+.*GREEN 的必要條件/m, what: 'GREEN 的必要條件' },
+    ],
+    'skills/codex-review/SKILL.md': [
+      { need: /<<<FINDINGS>>>/, what: '哨兵區塊契約' },
+      { need: /\[FAIL\]/, what: 'BLOCKER 必須講得出失效情境' },
+    ],
+  };
+  for (const [relPath, needles] of Object.entries(LOAD_BEARING)) {
+    const f = path.join(dir, relPath);
+    if (!fs.existsSync(f)) { bad(`承重檔案不見了：${relPath}`); continue; }
+    const text = fs.readFileSync(f, 'utf8');
+    for (const { need, what } of needles) {
+      if (!need.test(text)) {
+        bad(`${relPath} 少了承重段落「${what}」—— 它沒有別的來源，刪掉不會有任何測試變紅。`
+          + '\n    真的要移除或改名，請同時改 validate-plugin 的 LOAD_BEARING，讓下一個人看得到這個決定。');
+      }
+    }
+  }
+
   // ── 4. schema 與範例 ────────────────────────────────────────────────
   const schemaPath = path.join(dir, 'schemas', 'pipeline.schema.json');
   if (fs.existsSync(schemaPath)) {
