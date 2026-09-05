@@ -180,7 +180,10 @@ describe('⭐⭐ --revise 讓誠實的路變便宜', () => {
     } finally { cleanup(); }
   });
 
-  it('多次修訂各自留存，--delta 給最近一次', () => {
+  // ⚠️ 這一題原本斷言「--delta 給最近一次」——**那是把 D4 的形狀寫死成期望值**。
+  // 連續 revise 兩次未複審時，第一次的修改會從素材裡消失並隨這輪 CLEAR 被帶過。
+  // 現在改成全送；原本要守的性質（第二筆不該把第一筆再算成新增）保留，但限縮到第二筆那一段。
+  it('多次修訂全部進 --delta —— 少送會讓未審的修改溜過去（D4 的形狀）', () => {
     const { dir, cleanup } = sandbox(clearS3);
     try {
       run(dir, '--freeze', SPEC);
@@ -189,11 +192,33 @@ describe('⭐⭐ --revise 讓誠實的路變便宜', () => {
       writeFileSync(join(dir, SPEC), `${BODY}## 3. 第一次補充\n## 4. 第二次補充\n`);
       const rv = run(dir, '--revise', SPEC, '--why', '第二個理由');
       assert.equal(JSON.parse(rv.stdout).revision, '第 2 次');
+
       const d = run(dir, '--delta').stdout;
+      // ① 兩筆都要在 —— 這是 B1 的修正
+      assert.match(d, /第一個理由/, '第一筆未複審，不得從素材裡消失');
+      assert.match(d, /第一次補充/);
       assert.match(d, /第二個理由/);
       assert.match(d, /第二次補充/);
-      // 上下文行帶到「第一次補充」是正常的；不該出現的是它**再次被當成新增**（`+` 開頭）
-      assert.doesNotMatch(d, /^\+.*第一次補充/m, '第一次的改動已經凍進基準，不該再被算成新增');
+      assert.match(d, /全部都要審/, '多筆時要明講不只看最後一筆');
+
+      // ② 原本的性質：第二筆的 diff 不該把第一筆的內容再算成新增
+      const sections = d.split(/^### 修訂 #/m);
+      const rev2 = sections.find((x) => x.startsWith('2'));
+      assert.ok(rev2, '要能切出第二筆那一段');
+      assert.doesNotMatch(rev2, /^\+.*第一次補充/m,
+        '第一次的改動已經凍進第二筆的基準，不該在第二筆裡再被算成新增');
+    } finally { cleanup(); }
+  });
+
+  it('只有一筆修訂時，標題仍是單筆的講法（不要無謂嚇人）', () => {
+    const { dir, cleanup } = sandbox(clearS3);
+    try {
+      run(dir, '--freeze', SPEC);
+      writeFileSync(join(dir, SPEC), `${BODY}## 3. 只改一次\n`);
+      run(dir, '--revise', SPEC, '--why', '唯一的理由');
+      const d = run(dir, '--delta').stdout;
+      assert.match(d, /規格修訂 #1/);
+      assert.doesNotMatch(d, /全部都要審/);
     } finally { cleanup(); }
   });
 

@@ -198,22 +198,48 @@ function revise(spec, why) {
   }, null, 2));
 }
 
+/**
+ * 產生 S3 複審要貼的素材。
+ *
+ * ⚠️ **一定要送出「凍結之後的全部修訂」，不是只送最後一筆。**
+ *
+ * 舊版取 `revisions[revisions.length - 1]`，於是：
+ *   ① `--revise` 第一次（未複審）
+ *   ② `--revise` 第二次
+ *   ③ `--delta` 只印出第二次 ⇒ **第一次的修改從素材裡消失**，
+ *      而它會隨著這一輪的 CLEAR 被一起帶過
+ * 那正是死路 D4 的形狀：**以「最新一筆」代替「所有未審的修改都真的進過審查者」**，
+ * 而且不需要任何人主動偽造，正常的操作順序就會發生。
+ * （2026-09-05 由異廠商審查指出，S3 R1 的 B1。`--freeze` 會把 revisions 清空，
+ *   所以這裡的集合就是「上次凍結以來的全部」，不會無限成長。）
+ *
+ * ⇒ 一律全送。失敗方向是安全的：**多送只是重複，少送會讓未審的修改溜過去。**
+ */
 function showDelta() {
   const s = load();
   if (!s) { console.error('spec-freeze: 還沒凍結任何規格'); process.exit(10); }
-  const r = s.revisions[s.revisions.length - 1];
-  if (!r) { console.error('spec-freeze: 規格從凍結之後沒有改過 —— 沒有 delta'); process.exit(10); }
-  console.log(`## 規格修訂 #${r.n} —— 只審這段 delta
+  const all = s.revisions ?? [];
+  if (!all.length) { console.error('spec-freeze: 規格從凍結之後沒有改過 —— 沒有 delta'); process.exit(10); }
+
+  const head = all.length === 1
+    ? `## 規格修訂 #${all[0].n} —— 只審這段 delta`
+    : `## 凍結之後共有 ${all.length} 次修訂（#${all[0].n}–#${all[all.length - 1].n}）—— 全部都要審`;
+
+  const body = all.map((r) => `### 修訂 #${r.n}
 
 **為什麼要改**：${r.why}
 
-⚠️ 這是對**已經通過 S3 的規格**做的修改。請只針對這段 delta 判斷：
-1. 這個改動本身有沒有問題？
-2. 它有沒有讓規格與先前已收口的項目衝突？
-
 \`\`\`diff
 ${r.delta.trim()}
-\`\`\``);
+\`\`\``).join('\n\n');
+
+  console.log(`${head}
+
+⚠️ 這是對**已經通過 S3 的規格**做的修改。請針對**每一筆**修訂判斷：
+1. 這個改動本身有沒有問題？
+2. 它有沒有讓規格與先前已收口的項目衝突？
+${all.length > 1 ? '\n⚠️ 下面每一筆都尚未經過複審 —— 不要只看最後一筆。\n' : ''}
+${body}`);
 }
 
 const argv = process.argv.slice(2);

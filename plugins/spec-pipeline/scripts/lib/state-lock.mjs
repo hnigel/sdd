@@ -55,9 +55,41 @@ export function withLock(stateFile, fn, onBusy) {
   // ⚠️ `finally` 擋不住 `process.exit()` —— 而這些腳本到處都用 exit 表達 rc
   // （usage 是 2、STOP_ASK_OWNER 是 20…）。只靠 finally 會把鎖漏在磁碟上，
   // 下一個指令就被自己卡住。所以同時掛 exit handler。
+  /**
+   * 釋放：**只刪自己那一把**。
+   *
+   * ⚠️ 舊版是無條件 `unlinkSync(lock)` —— 按**路徑**刪，不看那把鎖還是不是自己的。
+   * 實際會出事的路徑（2026-09-05 由異廠商審查指出，S3 R1 的 B5）：
+   *   ① A 取得鎖並開始跑（xhigh 的 review 動輒十幾分鐘）
+   *   ② 操作者看到「疑似殘留」的提示，人工 `rm` 掉那把鎖 —— 但 A 還在跑
+   *   ③ B 取得鎖（路徑空了），寫進自己的 pid
+   *   ④ A 結束，`release()` 把 **B 的鎖**刪掉
+   *   ⑤ C 於是能在 B 仍持鎖時進來 ⇒ **兩個行程同時寫狀態檔**
+   * 那正是這把鎖存在要擋的事，而它自己製造了那個狀態。
+   *
+   * ⇒ 用 inode 比對：`fstatSync(fd)` 是我們開的那個檔，`statSync(lock)` 是現在
+   *   那條路徑上的檔。**不同就代表這條路徑已經換人了，不要碰。**
+   *   失敗方向是安全的：比不出來就留著（fail-closed，下一個人被擋下來），
+   *   而不是刪掉別人的（fail-open，兩個人同時寫）。
+   *
+   * ⚠️ 這依賴 inode 有意義（macOS / Linux / WSL 成立）。
+   */
   const release = () => {
+    let mine = false;
+    try {
+      const a = fs.fstatSync(fd);
+      const b = fs.statSync(lock);
+      mine = a.ino === b.ino && a.dev === b.dev;
+    } catch { /* 鎖已經不在了 —— 沒東西要刪 */ }
     try { fs.closeSync(fd); } catch { /* 已關 */ }
-    try { fs.unlinkSync(lock); } catch { /* 已刪 */ }
+    if (mine) {
+      try { fs.unlinkSync(lock); } catch { /* 剛好被刪，忽略 */ }
+    } else if (fs.existsSync(lock)) {
+      process.emitWarning(
+        `state-lock: ${lock} 已經不是這個行程建立的那一把（可能是被人工刪除後重建）——`
+        + ' 不刪它。若確認沒有行程在跑，請人工處理。',
+      );
+    }
   };
   process.on('exit', release);
   try {

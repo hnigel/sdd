@@ -147,7 +147,23 @@ S5 範例：
 | `target.base_sha` | `worktree` 必填、完整且可解析為 commit 的 SHA；不接受 `HEAD`、分支名或縮寫 |
 | `timeout_ms` | 選填，預設 1,200,000；整數 1,000–3,600,000，0 不代表無限 |
 
+⚠️ **`timeout_ms` 與鎖的 `STALE_MS` 是同一條命的兩端，必須一起決定。**
+現行 `state-lock.mjs` 的 `STALE_MS` 是 **10 分鐘**，而這裡預設持鎖 20 分鐘、上限 60 ——
+一次正常的 xhigh review 跑到一半就會被自己的提示標成「疑似殘留、請人工刪除」。
+操作者照著刪，就進入 B5 那條路徑。
+
+⇒ 實作 P1 時**必須**同時處理：`STALE_MS` 至少要大於 `timeout_ms` 的上限，
+或改成由持鎖者寫入自己的預期結束時間、由後來者比對。
+**先決定這個，再寫 runner** —— 否則新元件會把一個原本罕見的操作失誤變成常態。
+（2026-09-05 S3 R1 的 B5。歸屬檢查本身已於 0.8.0 修好：`release()` 只刪自己那一把。）
+
 request 本身可以放在暫存目錄。所有 target 路徑相對專案根目錄解讀。未知欄位、錯誤型別、錯誤 stage/kind 組合一律 RC=2；`spec-delta` 不接受呼叫者自填 delta，從既有 freeze 狀態取得。
+
+⚠️ **必須取「上次凍結以來的全部修訂」，不是最後一筆。** `--freeze` 會把 revisions 清空，
+所以那個集合天然有界。只送最後一筆會讓「連續 revise 兩次未複審」時第一筆從素材裡消失，
+並隨這一輪的 CLEAR 被帶過 —— 那是死路 D4 的形狀（以最新代替全部未審），
+而且不需要任何人偽造，正常操作順序就會發生。
+（2026-09-05 S3 R1 的 B1。`spec-freeze.mjs` 的 `showDelta()` 已於 0.8.0 改為全送。）
 
 完整 SHA 的例子僅示意長度。基準必須由主對話在任務開始、修改前取得並保存；runner 能驗 SHA 存在，不能證明它就是正確的入場基準。缺基準不得自動補目前 HEAD。
 
@@ -179,7 +195,18 @@ effort：
 
 ### 6.2 S5
 
-target 是 `base_sha` 至目前工作樹的完整差異，包含已 commit、staged、unstaged、刪除與 rename；用 git 的 NUL 分隔輸出處理含空白等檔名，不依換行拆檔案清單。另列出未追蹤且未被 gitignore 忽略的檔案；可讀文字內容作為附加目標。
+target 是 `base_sha` 至目前工作樹的完整差異，包含已 commit、staged、unstaged、刪除與 rename；用 git 的 NUL 分隔輸出處理含空白等檔名，不依換行拆檔案清單。另列出未追蹤且未被 gitignore 忽略的檔案。
+
+⚠️ **未追蹤項目的內容要不要讀，必須先過與 `spec_path` 同一組路徑規則**（§5.2）：
+用 `lstat` 判斷型別、**不跟隨 symlink**、解析後必須落在專案根目錄內、必須是一般檔案。
+不符合的**只列檔名、不讀內容**，並記進 `coverage_notes`。
+
+失效情境（若不做這道檢查）：工作樹裡有一個未被 gitignore 的 `debug.txt -> /etc/…`
+或指向家目錄金鑰的 symlink ⇒ collector 判它是可讀文字、`readFile` 跟隨過去、
+**repo 外的祕密被組進送給模型的 prompt**。Codex 的 read-only sandbox 保護不到這一段 ——
+那是 runner 在 `spawn` **之前**自己讀的。
+
+（2026-09-05 異廠商審查 S3 R1 的 B8：越界規則原本只寫在 `spec_path`，沒有套到收集到的未追蹤項目。）
 
 不提供額外 `paths` 過濾，以免主模型漏列有問題的修改。diff 使用 git 原生命令，關閉外部 diff/textconv，不經 shell 拼接。不包含 ignored 檔案的邊界必須寫在輸出；二進位與 submodule 等不可完整文字審查項目必須列明 `coverage_notes`，由主對話補對應驗證。
 
@@ -363,6 +390,7 @@ S3：主對話寫規格 → runner → 處理 findings → runner 複審 → 主
 | T14 | cwd/路徑含空白、Unicode、shell 特殊字元 | 不執行插入的 shell；能正確讀寫及引用 |
 | T15 | S5 已 commit＋staged＋unstaged＋untracked＋rename/delete | 所有非 ignored 目標出現在素材，基準不被 HEAD 取代 |
 | T16 | symlink 越界、無差異、超量 prompt、二進位／submodule | 前三者拒絕或對應 EMPTY_TARGET；不可文字覆核項目有 coverage_notes |
+| T16b | **未追蹤**的 symlink 指向 repo 外（`debug.txt -> /etc/passwd`）、指向目錄、指向不存在的目標 | 三者都**只列檔名不讀內容**並進 `coverage_notes`；prompt 內不得出現目標檔的任何一行 |
 | T17 | S3 spec-delta／S5 缺 freeze、drift | 不用未確認前提執行；合法 delta 素材含原因與當前規格 |
 | T18 | 小 hard 任務、50/300 邊界、legacy effort 缺失 | 固定選擇與提示符合 policy，doctor 共用同一 model 值 |
 
